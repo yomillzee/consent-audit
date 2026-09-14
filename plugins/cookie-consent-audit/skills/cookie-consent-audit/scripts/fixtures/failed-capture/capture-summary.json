@@ -1,0 +1,30 @@
+{
+  "url": "https://site.test/",
+  "capturedAt": "2026-01-01T00:00:00.000Z",
+  "cmp": null,
+  "categories_tested": [],
+  "category_detection_error": "skipped",
+  "states": {
+    "pre": {
+      "url": "https://site.test/",
+      "action": "pre",
+      "cmpMatch": null,
+      "error": "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://site.test/\nCall log:\n  - navigating to \"https://site.test/\", waiting until \"networkidle\"\n",
+      "harFile": "out/pre.har"
+    },
+    "accept": {
+      "url": "https://site.test/",
+      "action": "accept",
+      "cmpMatch": null,
+      "error": "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://site.test/\nCall log:\n  - navigating to \"https://site.test/\", waiting until \"networkidle\"\n",
+      "harFile": "out/postaccept.har"
+    },
+    "reject": {
+      "url": "https://site.test/",
+      "action": "reject",
+      "cmpMatch": null,
+      "error": "page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://site.test/\nCall log:\n  - navigating to \"https://site.test/\", waiting until \"networkidle\"\n",
+      "harFile": "out/postreject.har"
+    }
+  }
+}

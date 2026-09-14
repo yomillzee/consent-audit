@@ -128,6 +128,105 @@ print("analyze output matches expectations (network gaps, tracker matrix, cookie
 PY
 
 echo
+echo "== failed capture is inconclusive, never a pass =="
+# The dangerous case: the site never loaded, so nothing fired anywhere. Without
+# an explicit usability check every gap list is empty and the pipeline happily
+# reports a clean bill of health for a site it never reached.
+FAILED="$WORK/failed"
+mkdir -p "$FAILED"
+cp "$SCRIPTS/fixtures/failed-capture/"* "$FAILED/"
+
+python3 "$SCRIPTS/analyze_har.py" "$FAILED" > "$WORK/failed.stdout"
+
+python3 - "$FAILED/findings.json" "$WORK/failed.stdout" <<'PY2'
+import json, sys
+f = json.load(open(sys.argv[1]))
+s = f["summary"]
+stdout = open(sys.argv[2], encoding="utf-8").read()
+
+errors = []
+
+if s["capture_usable"]:
+    errors.append("a capture where every state failed to load must not be marked usable")
+if sorted(s["states_inconclusive"]) != ["postaccept", "postreject", "pre"]:
+    errors.append(f"all three states must be inconclusive, got {s['states_inconclusive']}")
+if len(s["capture_errors"]) != 3:
+    errors.append(f"expected 3 capture errors, got {len(s['capture_errors'])}")
+if not all(e["error"] for e in s["capture_errors"]):
+    errors.append("every capture error must carry a reason")
+if not any("ERR_TUNNEL_CONNECTION_FAILED" in e["error"] for e in s["capture_errors"]):
+    errors.append("the navigation error from capture-summary.json must be surfaced")
+if s["consent_gaps_authoritative"]:
+    errors.append("gap findings must not be authoritative when the capture failed")
+
+# The empty findings themselves are expected - what must not happen is any of
+# them being presented as a clean result.
+if s["consent_gaps"]:
+    errors.append("a capture that loaded nothing cannot produce gaps")
+if s["trackers_detected_total"]:
+    errors.append("a capture that loaded nothing cannot detect trackers")
+
+# Per-state usability must be recorded, so a partial failure is attributable.
+for st in ("pre", "postaccept", "postreject"):
+    if f["states"][st].get("usable"):
+        errors.append(f"state {st} must be marked unusable")
+    if not f["states"][st].get("capture_error"):
+        errors.append(f"state {st} must carry its capture error")
+
+# A human reading the console must not walk away reassured.
+if "No consent gaps found" in stdout:
+    errors.append("console must not print the clean-result line for a failed capture")
+if "CAPTURE INCONCLUSIVE" not in stdout:
+    errors.append("console must announce the capture as inconclusive")
+if "NOT a pass" not in stdout:
+    errors.append("console must say explicitly that this is not a pass")
+
+if errors:
+    print("FAILED-CAPTURE HANDLING BROKEN:")
+    for e in errors:
+        print("  -", e)
+    sys.exit(1)
+print("total capture failure reported as inconclusive, not as a clean result")
+PY2
+
+# A single bad state is enough to taint the verdict: the states that did load
+# are still reported, but the run as a whole is no longer a pass.
+PARTIAL="$WORK/partial"
+mkdir -p "$PARTIAL"
+cp "$SCRIPTS/fixtures/"*.har "$SCRIPTS/fixtures/"*.json "$PARTIAL/"
+python3 - "$PARTIAL/capture-summary.json" <<'PY2'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["states"] = {"reject": {"action": "reject", "error": "page.goto: net::ERR_ABORTED at https://site.test/"}}
+json.dump(d, open(p, "w"), indent=2)
+PY2
+
+python3 "$SCRIPTS/analyze_har.py" "$PARTIAL" > "$WORK/partial.stdout"
+
+python3 - "$PARTIAL/findings.json" <<'PY2'
+import json, sys
+f = json.load(open(sys.argv[1]))
+s = f["summary"]
+errors = []
+if s["capture_usable"]:
+    errors.append("one failed state must make the whole capture inconclusive")
+if s["states_inconclusive"] != ["postreject"]:
+    errors.append(f"only postreject should be inconclusive, got {s['states_inconclusive']}")
+if not f["states"]["pre"]["usable"] or not f["states"]["postaccept"]["usable"]:
+    errors.append("states that loaded fine must stay usable")
+# The good states still did their job, so real findings must survive.
+if not s["consent_gaps"]:
+    errors.append("findings from the states that did load must still be reported")
+if errors:
+    print("PARTIAL-FAILURE HANDLING BROKEN:")
+    for e in errors:
+        print("  -", e)
+    sys.exit(1)
+print("partial capture failure taints the verdict while keeping real findings")
+PY2
+
+echo
 echo "== signature list coverage =="
 python3 - "$SCRIPTS" <<'PY'
 import json, os, sys

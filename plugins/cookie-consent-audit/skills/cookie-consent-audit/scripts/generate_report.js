@@ -75,19 +75,31 @@ function main() {
   const catTests = summary.category_tests || [];
   const catViolations = summary.category_violations || [];
   const catInconclusive = catTests.filter((c) => !c.configured);
+  // A state that never loaded observed nothing. Absent the flag (findings from
+  // an older analyzer), assume the capture was fine rather than crying wolf.
+  const captureUsable = summary.capture_usable !== false;
+  const captureErrors = summary.capture_errors || [];
 
   const children = [
     new Paragraph({ spacing: { before: 1400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Cookie Consent Compliance Review", bold: true, size: 44, color: NAVY })] }),
     new Paragraph({ spacing: { before: 200 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: `${siteName} — ${siteUrl}`, size: 28, color: "444444" })] }),
     new Paragraph({ spacing: { before: 600 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: `Prepared ${dateStr}`, size: 22, color: "666666" })] }),
     new Paragraph({ spacing: { before: 100 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Full audit — network traffic, cookies and web storage across pre-consent, post-accept and post-reject states", size: 20, color: "666666", italics: true })] }),
+    captureUsable
+      ? null
+      : new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "INCONCLUSIVE — CAPTURE INCOMPLETE, DO NOT RELY ON THESE RESULTS", bold: true, size: 26, color: RED })] }),
     new Paragraph({ children: [new PageBreak()] }),
 
     h1("Executive Summary"),
     p(`This review assessed the cookie/tracking consent behavior of ${siteName} (${siteUrl}) using live captures taken before any consent decision, immediately after accepting, and immediately after rejecting. Each state used a fresh, isolated browser session and visited the same set of pages, so the three states are directly comparable.`),
+    captureUsable
+      ? null
+      : p(`CAPTURE INCONCLUSIVE — the site failed to load in ${captureErrors.length} of 3 consent states, so this run observed no traffic to judge. Nothing below is a pass: an empty finding means "not tested", not "nothing fired". The capture must be repaired and re-run before this document is relied upon for any compliance conclusion.`, { bold: true, color: RED }),
     hasGaps
       ? p(`${gaps.length} third-party tracker(s) were found firing outside of proper consent gating.`, { bold: true, color: RED })
-      : p("No tracker consent gaps were found: every detected third-party tracker only activated after the visitor accepted, and none fired before consent or after rejection.", { bold: true, color: GREEN }),
+      : (captureUsable
+          ? p("No tracker consent gaps were found: every detected third-party tracker only activated after the visitor accepted, and none fired before consent or after rejection.", { bold: true, color: GREEN })
+          : null),
     catViolations.length
       ? p(`${catViolations.length} tracker(s) fired despite their consent category being explicitly denied.`, { bold: true, color: RED })
       : (catTests.some((c) => c.configured)
@@ -100,8 +112,24 @@ function main() {
       ? p(`${cookieGapsPre.length} tracking or third-party cookie(s) were set before any consent decision.`, { bold: true, color: RED })
       : (storageCaptured
           ? p("No tracking or third-party cookies were set before a consent decision.", { color: GREEN })
-          : p("Cookie/web-storage capture was not available for this run; findings below are based on network traffic only.", { italics: true, color: AMBER })),
+          : (captureUsable
+              ? p("Cookie/web-storage capture was not available for this run; findings below are based on network traffic only.", { italics: true, color: AMBER })
+              : null)),
   ];
+
+  // ---- Capture integrity: only present when something went wrong ----
+  if (!captureUsable) {
+    children.push(
+      h1("Capture Integrity — Results Not Valid"),
+      p("This audit depends on loading the site in each consent state and recording what it does. The state(s) below did not load, so they contribute no observations. Any state listed here was not tested, and the absence of findings for it carries no meaning.", { bold: true, color: RED }),
+      makeTable(
+        ["State", "Outcome"],
+        captureErrors.map((e) => [e.state, e.error]),
+        [3160, 6000]
+      ),
+      p("Common causes: the network blocked the site or its trackers, the URL was wrong or redirected, or the browser could not start. Resolve the cause, re-run the capture, and confirm every state reports traffic before issuing this report.", { italics: true }),
+    );
+  }
 
   // ---- Scope of what was examined ----
   children.push(
@@ -284,6 +312,9 @@ function main() {
   // ---- Recommendations ----
   children.push(h1("Recommendations"));
   const recs = [];
+  if (!captureUsable) {
+    recs.push(bullet(`Re-run the capture: the site did not load in ${captureErrors.length} of 3 consent states, so this audit reached no conclusion. Every other item in this report is limited to what the states that did load revealed.`));
+  }
   if (hasGaps) {
     recs.push(bullet("Move any tracker listed with 'Fired Pre-Consent: Yes' behind the consent management platform's gating logic immediately — this is the highest-severity finding."));
     recs.push(bullet("For trackers still active after rejection, confirm the CMP's 'Reject All' action is correctly wired to block that specific tag."));
@@ -321,7 +352,7 @@ function main() {
     bullet("Classified requests and cookie domains against a signature list of common analytics, advertising, and marketing services."),
     bullet("Cross-referenced each tracker, cookie and third-party domain across states to identify consent-gating gaps."),
     ...(catTests.length ? [bullet("Additionally exercised each consent category individually: opened the preferences panel, granted exactly one category, denied the rest, saved, and re-captured. Scenarios where the panel could not be driven reliably are reported as inconclusive rather than as passes.")] : []),
-    p("Limitations: category assignment for each service is a judgment call and should be checked against the site's own declared cookie categories. First/third-party classification uses a best-effort registrable-domain heuristic. Trackers absent from the signature list appear as unclassified domains rather than named services, and require manual review. A capture reflects one point in time; tag manager changes can alter behavior at any point after it.", { italics: true, color: "555555", size: 18 }),
+    p("Limitations: a state that fails to load produces no observations, and is reported as inconclusive rather than as a clean result. Category assignment for each service is a judgment call and should be checked against the site's own declared cookie categories. First/third-party classification uses a best-effort registrable-domain heuristic. Trackers absent from the signature list appear as unclassified domains rather than named services, and require manual review. A capture reflects one point in time; tag manager changes can alter behavior at any point after it.", { italics: true, color: "555555", size: 18 }),
   );
 
   const doc = new Document({
