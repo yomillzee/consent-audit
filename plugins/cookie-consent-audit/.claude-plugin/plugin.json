@@ -1,0 +1,12 @@
+{
+  "name": "cookie-consent-audit",
+  "version": "1.0.0",
+  "description": "Automates a cookie/tracking consent compliance audit: captures pre/post-accept/post-reject network traffic on a target site and produces a client-ready Word report.",
+  "author": {
+    "name": "yomillzee"
+  },
+  "homepage": "https://github.com/yomillzee/consent-audit",
+  "repository": "https://github.com/yomillzee/consent-audit",
+  "keywords": ["cookies", "consent", "gdpr", "ccpa", "compliance", "playwright", "audit"],
+  "license": "Apache-2.0"
+}

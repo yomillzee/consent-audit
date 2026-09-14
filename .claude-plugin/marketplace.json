@@ -1,0 +1,16 @@
+{
+  "name": "consent-audit",
+  "owner": {
+    "name": "yomillzee"
+  },
+  "metadata": {
+    "description": "Shared Claude Code audit/compliance tooling."
+  },
+  "plugins": [
+    {
+      "name": "cookie-consent-audit",
+      "source": "./plugins/cookie-consent-audit",
+      "description": "Automates a cookie/tracking consent compliance audit for a website: captures pre/post-accept/post-reject network traffic and produces a client-ready Word report."
+    }
+  ]
+}
