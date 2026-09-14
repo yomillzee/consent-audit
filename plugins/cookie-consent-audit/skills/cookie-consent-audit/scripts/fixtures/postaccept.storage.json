@@ -1,0 +1,98 @@
+{
+  "state": "postaccept",
+  "cookies": [
+    {
+      "name": "_ga",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 400,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    },
+    {
+      "name": "_hjSessionUser",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 365,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    },
+    {
+      "name": "_GRECAPTCHA",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 180,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    },
+    {
+      "name": "sessionid",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": true,
+      "expires_days": null,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    },
+    {
+      "name": "_fbp",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 90,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    },
+    {
+      "name": "_clck",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 365,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    },
+    {
+      "name": "third_party_id",
+      "domain": "ads.vendor.example",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 730,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    }
+  ],
+  "local_storage": [
+    {
+      "origin": "https://site.test",
+      "name": "_tracking_uid",
+      "value_length": 12
+    }
+  ],
+  "session_storage": [],
+  "errors": []
+}

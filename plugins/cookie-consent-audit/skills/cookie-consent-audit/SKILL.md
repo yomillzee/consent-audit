@@ -9,7 +9,14 @@ metadata:
 
 # Cookie Consent Audit
 
-Automates the full workflow: ask for a website → capture live network traffic before and after a consent decision → classify trackers → produce a client-ready Word report.
+Automates the full workflow: ask for a website → capture live network traffic,
+cookies and web storage before and after a consent decision → classify
+everything observed → produce a client-ready Word report.
+
+This is a **full-disclosure audit**. Every tracker, cookie and third-party
+domain observed is carried through to the report. The allowlist only changes how
+an item is *labelled* so the headline gap count stays legally meaningful — it
+never hides anything. Do not filter findings when summarizing for the user.
 
 ## Prerequisites
 
@@ -58,9 +65,16 @@ Run from the user's working directory so output lands somewhere they can find:
 node "$SCRIPTS/capture_har.js" <url> --outdir ./audit-out --paths "/,/about,/pricing"
 ```
 
-This produces `pre.har`, `postaccept.har`, `postreject.har`, and
-`capture-summary.json` in `./audit-out`. Each capture uses a fresh, isolated
-browser context so results from one state can't leak into another.
+This produces `pre.har`, `postaccept.har`, `postreject.har`, matching
+`<state>.storage.json` files, and `capture-summary.json` in `./audit-out`. Each
+capture uses a fresh, isolated browser context so results from one state can't
+leak into another, and every state visits the same pages so the three are
+directly comparable.
+
+The `.storage.json` files hold cookies, localStorage and sessionStorage read
+straight from the browser. This matters: most tracking cookies (`_ga`, `_fbp`,
+`_hjSessionUser`) are written client-side as **first-party** cookies and never
+appear in HAR traffic at all, so a network-only capture misses them.
 
 The script auto-detects the consent banner using known selector profiles for
 CookieYes, OneTrust, Cookiebot, Termly, Osano, and Usercentrics, falling back
@@ -90,23 +104,27 @@ node "$SCRIPTS/capture_har.js" <url> --outdir ./audit-out --executable-path /pat
 python3 "$SCRIPTS/analyze_har.py" ./audit-out
 ```
 
-This classifies every request in each HAR against `trackers.json` (a
-generic signature list covering GA4, Google Ads, Meta Pixel, TikTok, LinkedIn,
-HubSpot, Hotjar, Clarity, and more) and writes `./audit-out/findings.json`,
-which includes:
+This classifies requests against `trackers.json` (URL signatures) and cookies
+against `cookie_signatures.json` (cookie-name signatures, since first-party
+tracking cookies can only be identified by name), then writes
+`./audit-out/findings.json`, which includes:
 
-- Request counts and detected trackers per state
+- `tracker_matrix`: **every** tracker observed, with its full pre/accept/reject
+  firing pattern, request volume and classification
 - `consent_gaps`: trackers that fired **before consent** (high severity) or
   **after rejection** (medium severity) — the core compliance finding
-- `trackers_correctly_gated`: trackers that only appeared after Accept
+- `cookie_gaps_pre_consent` / `cookie_gaps_after_reject`: tracking or
+  third-party cookies present when they shouldn't be
 - `necessary_services_active`: services in `necessary_allowlist.json`
-  (anti-spam, CAPTCHA, payments) that are expected pre-consent and are
-  therefore reported separately rather than counted as gaps
+  (anti-spam, CAPTCHA, payments, the CMP's own cookie) — labelled, still fully
+  reported, but excluded from the headline gap count
+- `third_party_domains_all_states`: every non-first-party domain contacted,
+  with unclassified ones flagged for manual review
+- Complete per-state cookie, localStorage and sessionStorage inventories
 
-If the site uses a tracker not in `trackers.json`, its domain will show up
-under `unknown_domains` in each state's analysis — add a new entry to
-`trackers.json` if it's a known service, or mention it to the user for manual
-classification.
+A tracker with no signature entry still appears as an unclassified domain — it
+is never dropped. Add known services to `trackers.json` / `cookie_signatures.json`
+so future audits name them, and flag the rest to the user for manual review.
 
 ### 4. Generate the client-ready report
 
@@ -115,9 +133,12 @@ node "$SCRIPTS/generate_report.js" ./audit-out/findings.json "<Site Display Name
   --out "Cookie_Consent_Compliance_Review.docx"
 ```
 
-This produces a formatted Word document: executive summary, a findings table,
-a consent-gap table (if any gaps exist), correctly-gated trackers, necessary
-services, and recommendations tailored to whether gaps were found.
+This produces a formatted Word document covering: executive summary, audit
+scope, the full tracker inventory, consent-gap analysis, services classified as
+necessary (with their firing pattern shown so the classification can be
+reviewed), complete cookie and web-storage tables per state, every third-party
+domain contacted, recommendations tailored to the findings, and methodology
+with its limitations stated.
 
 If LibreOffice is available, verify it renders before handing it over:
 
@@ -136,12 +157,17 @@ consent — see the report"), then deliver the .docx.
 
 ## Notes and limitations
 
-- HAR captures record HTTP-level network requests, not client-side
-  `document.cookie` writes — a tracker's exact cookie names may not appear
-  even when its network requests do. The report notes this.
 - Auto-detection covers common CMPs; unusual custom banners may need manual
   selectors (see step 2).
-- `trackers.json` and `necessary_allowlist.json` are living lists — extend them
-  as new services come up, rather than hardcoding new logic into the scripts.
+- `trackers.json`, `cookie_signatures.json` and `necessary_allowlist.json` are
+  living lists — extend them as new services come up, rather than hardcoding
+  new logic into the scripts.
+- First/third-party classification uses a best-effort registrable-domain
+  heuristic rather than the full public suffix list.
+- A capture is a point-in-time snapshot. Tag manager changes can alter behavior
+  immediately afterwards.
+- Whether a service is "strictly necessary" is a legal determination, not a
+  technical one. Present the allowlist as an assumption to be confirmed, never
+  as a settled conclusion.
 - Consider running the capture against staging rather than production if the
   site has irreversible actions tied to page navigation (forms, purchases).

@@ -1,6 +1,7 @@
 [
   "CleanTalk",
   "Cloudflare Insights",
-  "reCAPTCHA",
-  "Stripe"
+  "Consent Manager (CMP)",
+  "Stripe",
+  "reCAPTCHA"
 ]

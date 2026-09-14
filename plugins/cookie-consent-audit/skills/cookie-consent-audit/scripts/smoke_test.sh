@@ -12,21 +12,24 @@ SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-cp "$SCRIPTS/fixtures/"*.har "$WORK/"
+cp "$SCRIPTS/fixtures/"*.har "$SCRIPTS/fixtures/"*.json "$WORK/"
 
 echo "== analyze =="
 python3 "$SCRIPTS/analyze_har.py" "$WORK"
 
 python3 - "$WORK/findings.json" <<'PY'
 import json, sys
-s = json.load(open(sys.argv[1]))["summary"]
+f = json.load(open(sys.argv[1]))
+s = f["summary"]
 
+errors = []
+
+# --- network-level gap analysis ---
 gaps = {g["tracker"]: g for g in s["consent_gaps"]}
 expected_gaps = {"Google Analytics (GA4/UA)", "Google Tag Manager"}
 expected_gated = {"Meta / Facebook Pixel", "Microsoft Clarity"}
 expected_necessary = {"reCAPTCHA"}
 
-errors = []
 if set(gaps) != expected_gaps:
     errors.append(f"consent_gaps: expected {sorted(expected_gaps)}, got {sorted(gaps)}")
 if set(s["trackers_correctly_gated"]) != expected_gated:
@@ -39,12 +42,48 @@ if gaps.get("Google Tag Manager", {}).get("fired_after_reject") is not True:
 if gaps.get("Google Analytics (GA4/UA)", {}).get("severity") != "high":
     errors.append("expected Google Analytics gap to be high severity")
 
+# --- full disclosure: nothing observed may be dropped from the matrix ---
+matrix = {m["tracker"]: m for m in s["tracker_matrix"]}
+if set(matrix) != set(s["trackers_detected_total"]):
+    errors.append("tracker_matrix must contain every detected tracker")
+if not matrix.get("reCAPTCHA", {}).get("allowlisted_as_necessary"):
+    errors.append("allowlisted services must still appear in the matrix, labelled necessary")
+
+# --- cookies: first-party, JS-set tracking cookies must be caught by NAME ---
+if not s["storage_captured"]:
+    errors.append("storage fixtures were not picked up")
+cookie_gaps = {c["name"]: c for c in s["cookie_gaps_pre_consent"]}
+if "_ga" not in cookie_gaps:
+    errors.append("_ga (first-party, JS-set) must be flagged as a pre-consent cookie")
+if cookie_gaps.get("_ga", {}).get("attributed_to") != "Google Analytics (GA4/UA)":
+    errors.append("_ga must be attributed to Google Analytics by cookie name")
+# Hotjar has no network request anywhere in the fixtures - cookie-only detection.
+if "_hjSessionUser" not in cookie_gaps:
+    errors.append("_hjSessionUser must be detected from the cookie alone (no Hotjar request exists)")
+if "Hotjar" in s["trackers_detected_total"]:
+    errors.append("fixture drift: Hotjar should NOT be detectable from network traffic")
+# Allowlisted and genuinely-first-party cookies must not be flagged as gaps.
+if "_GRECAPTCHA" in cookie_gaps:
+    errors.append("_GRECAPTCHA is allowlisted and must not be a cookie gap")
+if "sessionid" in cookie_gaps:
+    errors.append("unattributed first-party cookie must not be a cookie gap")
+# ...but they must still be listed in the full per-state cookie table.
+all_pre = {c["name"] for c in f["states"]["pre"]["storage"]["cookies"]}
+if not {"_ga", "_GRECAPTCHA", "sessionid"} <= all_pre:
+    errors.append(f"full pre-consent cookie list must include everything observed, got {sorted(all_pre)}")
+if not cookie_gaps.get("_ga", {}).get("long_lived"):
+    errors.append("_ga (400d) must be marked long_lived")
+# Third-party detection off the site domain in capture-summary.json.
+tp = [c for c in f["states"]["postaccept"]["storage"]["cookies"] if c["third_party"]]
+if {c["name"] for c in tp} != {"third_party_id"}:
+    errors.append(f"third-party cookie detection wrong: {[c['name'] for c in tp]}")
+
 if errors:
     print("ANALYZE FAILED:")
     for e in errors:
         print("  -", e)
     sys.exit(1)
-print("analyze output matches expectations")
+print("analyze output matches expectations (network gaps, tracker matrix, cookies, third-party)")
 PY
 
 echo

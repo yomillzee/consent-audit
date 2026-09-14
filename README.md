@@ -4,10 +4,16 @@ A Claude Code plugin marketplace hosting **cookie-consent-audit** — a skill th
 runs a cookie/tracking consent compliance audit on any website and produces a
 client-ready Word report.
 
-Given a URL, it captures live network traffic in three isolated browser sessions
-(no consent decision, after "Accept All", after "Reject All"), classifies every
-request against a tracker signature list, and flags trackers that fired before
-consent or after rejection.
+Given a URL, it captures live network traffic **plus cookies, localStorage and
+sessionStorage** in three isolated browser sessions (no consent decision, after
+"Accept All", after "Reject All"), classifies everything observed, and flags
+anything that fired or was stored before consent or after rejection.
+
+It is a full-disclosure audit: every tracker, cookie and third-party domain seen
+is reported. Services classified as strictly necessary are labelled as such and
+kept out of the headline gap count, but are still shown in full with their
+firing pattern, so the classification can be reviewed rather than taken on
+trust.
 
 ## Setup (each team member, once)
 
@@ -63,13 +69,25 @@ Useful things to ask for:
 
 | Section | Contents |
 | --- | --- |
-| Executive summary | Whether any consent gaps were found |
-| Key findings | Request counts and trackers per state (pre / post-reject / post-accept) |
+| Executive summary | Whether any tracker or cookie consent gaps were found |
+| Scope of this audit | Requests, trackers, third-party domains and cookies per state |
+| Full tracker inventory | Every tracker observed, its firing pattern across all three states, request volume and classification |
 | Consent gap analysis | Trackers that fired pre-consent (high) or after reject (medium) |
-| Correctly gated trackers | Trackers that only appeared after Accept |
-| Necessary services | Allowlisted services (CAPTCHA, anti-spam, payments) expected pre-consent |
-| Recommendations | Tailored to whether gaps were found |
+| Services classified as necessary | Allowlisted services shown with their actual firing pattern, for sign-off |
+| Cookies and web storage | Cookies set before consent, cookies surviving reject, and the complete cookie / localStorage / sessionStorage inventory per state |
+| All third-party domains | Every non-first-party domain contacted, with unclassified ones flagged |
+| Recommendations | Tailored to the findings |
 | Methodology | How the capture was performed, and its limitations |
+
+### Why cookies are captured separately from network traffic
+
+HAR files record HTTP traffic only. Most tracking cookies — `_ga`, `_fbp`,
+`_hjSessionUser` — are written client-side by JavaScript as **first-party**
+cookies, so they never appear in network traffic and can't be identified by
+domain. The audit reads them straight from the browser and matches them by
+cookie name, which is why `cookie_signatures.json` exists alongside
+`trackers.json`. In testing, this surfaced a tracker that made no network
+request at all.
 
 ## Repo layout
 
@@ -83,28 +101,41 @@ plugins/cookie-consent-audit/
       capture_har.js                    Playwright capture (pre / accept / reject)
       analyze_har.py                    HAR classification + gap analysis
       generate_report.js                .docx report generation
-      trackers.json                     tracker signature list
-      necessary_allowlist.json          services expected to run pre-consent
+      trackers.json                     URL signatures for network requests
+      cookie_signatures.json            cookie-name signatures (first-party cookies)
+      necessary_allowlist.json          services labelled as expected pre-consent
       smoke_test.sh                     offline end-to-end check
 ```
 
-## Maintaining the tracker lists
+## Maintaining the signature lists
 
-`trackers.json` maps a display name to URL substrings. To add a service, add an
-entry — no code changes needed:
+`trackers.json` maps a display name to URL substrings:
 
 ```json
 "Vendor Name": ["vendor.com", "/vendor/collect"]
 ```
 
-`necessary_allowlist.json` lists tracker names that are *expected* to run before
-consent (CAPTCHA, anti-spam, fraud prevention, payments). Anything listed there
-is reported separately instead of being flagged as a compliance gap. Whether a
-given service is genuinely "strictly necessary" is a legal judgment call — review
-it with whoever signs off on the audit.
+`cookie_signatures.json` maps the same display name to cookie names, where a
+trailing `*` matches by prefix:
 
-When an audit surfaces a domain under `unknown_domains` that turns out to be a
-real tracker, add it to `trackers.json` and open a PR so the whole team benefits.
+```json
+"Vendor Name": ["_vnd_id", "_vnd_ses*"]
+```
+
+Use the same display name in both files so network and cookie evidence for one
+service line up in the report. No code changes are needed to add a service.
+
+`necessary_allowlist.json` lists services that are *expected* to run before
+consent (CAPTCHA, anti-spam, fraud prevention, payments, the consent banner's
+own cookie). Entries there are kept out of the headline gap count but are still
+listed in full, with their firing pattern, under "Services Classified as
+Necessary". **Whether a service genuinely qualifies as "strictly necessary" is a
+legal determination, not a technical one** — treat the allowlist as an
+assumption for whoever signs off on the audit to confirm.
+
+When an audit surfaces an unclassified domain or cookie that turns out to be a
+real tracker, add it to the signature lists and open a PR so the whole team
+benefits.
 
 ## Verifying your setup
 

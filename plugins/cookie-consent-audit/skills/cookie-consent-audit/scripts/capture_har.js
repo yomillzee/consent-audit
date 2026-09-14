@@ -128,7 +128,65 @@ async function detectAndClick(page, kind, overrideSelector) {
   return null;
 }
 
-async function captureState({ url, outPath, action, overrideSelectors, waitMs, extraPaths, executablePath }) {
+// Cookie values can carry identifiers, so record a short preview and the length
+// rather than the raw value — audits need the name/domain/lifetime, not the payload.
+function summarizeCookie(c) {
+  const val = typeof c.value === 'string' ? c.value : '';
+  const persistent = typeof c.expires === 'number' && c.expires > 0;
+  return {
+    name: c.name,
+    domain: c.domain,
+    path: c.path,
+    session_cookie: !persistent,
+    expires_days: persistent ? Math.round((c.expires * 1000 - Date.now()) / 86400000) : null,
+    http_only: !!c.httpOnly,
+    secure: !!c.secure,
+    same_site: c.sameSite || null,
+    value_preview: val.length > 24 ? val.slice(0, 24) + '...' : val,
+    value_length: val.length,
+  };
+}
+
+// HAR files only record HTTP traffic, so client-side `document.cookie` writes and
+// localStorage/sessionStorage never appear there. Pull them from the live context
+// before it closes so the audit sees storage the network capture structurally misses.
+async function captureStorage(context, page) {
+  const out = { cookies: [], local_storage: [], session_storage: [], errors: [] };
+
+  try {
+    const state = await context.storageState();
+    out.cookies = (state.cookies || []).map(summarizeCookie);
+    for (const origin of state.origins || []) {
+      for (const item of origin.localStorage || []) {
+        out.local_storage.push({
+          origin: origin.origin,
+          name: item.name,
+          value_length: (item.value || '').length,
+        });
+      }
+    }
+  } catch (e) {
+    out.errors.push(`storageState: ${e.message}`);
+  }
+
+  try {
+    const ss = await page.evaluate(() => {
+      const items = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        items.push({ name: k, value_length: (sessionStorage.getItem(k) || '').length });
+      }
+      return { origin: location.origin, items };
+    });
+    out.session_storage = (ss.items || []).map((it) => ({ origin: ss.origin, ...it }));
+  } catch (e) {
+    out.errors.push(`sessionStorage: ${e.message}`);
+  }
+
+  return out;
+}
+
+async function captureState({ url, outPath, storagePath, action, overrideSelectors, waitMs, extraPaths, executablePath }) {
   const browser = await chromium.launch(executablePath ? { executablePath } : {});
   const context = await browser.newContext({ recordHar: { path: outPath, mode: 'full' } });
   const page = await context.newPage();
@@ -148,8 +206,11 @@ async function captureState({ url, outPath, action, overrideSelectors, waitMs, e
 
     await page.waitForTimeout(waitMs);
 
-    // Visit a couple more pages so cookies/tags set on navigation get captured too
-    if (action !== 'pre' && extraPaths && extraPaths.length) {
+    // Visit a couple more pages so cookies/tags set on navigation get captured too.
+    // This runs for the pre-consent state as well: browsing a different number of
+    // pages per state would make the request counts and tracker sets incomparable,
+    // and would hide pre-consent trackers that only fire on deeper pages.
+    if (extraPaths && extraPaths.length) {
       for (const p of extraPaths) {
         try {
           await page.goto(new URL(p, url).toString(), { waitUntil: 'networkidle', timeout: 20000 });
@@ -159,11 +220,20 @@ async function captureState({ url, outPath, action, overrideSelectors, waitMs, e
         }
       }
     }
+    result.storage = await captureStorage(context, page);
   } catch (e) {
     result.error = e.message;
   } finally {
     await context.close(); // HAR is flushed on context close
     await browser.close();
+  }
+
+  if (result.storage && storagePath) {
+    fs.writeFileSync(storagePath, JSON.stringify({ state: action, ...result.storage }, null, 2));
+    result.storageFile = storagePath;
+    result.cookieCount = result.storage.cookies.length;
+    result.localStorageCount = result.storage.local_storage.length;
+    delete result.storage; // keep capture-summary.json readable; detail lives in the storage file
   }
 
   return result;
@@ -195,13 +265,19 @@ async function captureState({ url, outPath, action, overrideSelectors, waitMs, e
 
   for (const s of states) {
     const outPath = path.join(outdir, s.file);
+    // Name the storage file after the HAR (pre/postaccept/postreject), not the
+    // action verb, so the analyzer finds it alongside its matching capture.
+    const storagePath = path.join(outdir, s.file.replace(/\.har$/, '.storage.json'));
     console.log(`Capturing [${s.action}] -> ${outPath}`);
-    const result = await captureState({ url, outPath, action: s.action, overrideSelectors, waitMs, extraPaths, executablePath });
+    const result = await captureState({ url, outPath, storagePath, action: s.action, overrideSelectors, waitMs, extraPaths, executablePath });
     summary.states[s.action] = { ...result, harFile: outPath };
     if (result.error) {
       console.warn(`  Warning: ${result.error}`);
     } else if (s.action !== 'pre') {
       console.log(`  Consent button matched via: ${result.cmpMatch ? result.cmpMatch.matched : 'NOT FOUND'}`);
+    }
+    if (result.cookieCount !== undefined) {
+      console.log(`  Cookies: ${result.cookieCount}, localStorage keys: ${result.localStorageCount}`);
     }
   }
 
