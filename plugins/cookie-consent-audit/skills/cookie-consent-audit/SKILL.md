@@ -29,6 +29,24 @@ machine, or a CI runner with open network access, both work.
 Python 3 (standard library only) is used for `analyze_har.py`; Node 18+ for the
 other two scripts.
 
+## Quick path
+
+For a routine audit, one command does capture, analysis and report, installing
+what it needs on first run:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/cookie-consent-audit/scripts/run_audit.sh" <url> "<Site Name>"
+```
+
+Extra arguments pass through to `capture_har.js` (`--paths`, `--skip-categories`,
+`--accept-selector`, ...). It stops rather than analyzing a capture that failed
+to load. Use the step-by-step workflow below when a run needs debugging, or when
+the banner needs explicit selectors.
+
+Whichever path you take, check the console before reporting: `CAPTURE
+INCONCLUSIVE` or `NO CONSENT BANNER WAS EXERCISED` both mean the run proved
+nothing, and neither may be reported as a clean result.
+
 ## Workflow
 
 ### 0. Locate the scripts and install dependencies
@@ -138,6 +156,14 @@ category via `tracker_categories.json`, then writes
 - `capture_usable` / `capture_errors` / `states_inconclusive`: whether the site
   actually loaded in each state. If any state failed, everything below it was
   never observed and must not be reported as a pass
+- `technology_matrix`: the client-facing inventory — one row per technology with
+  vendor, purpose, how many pages it was found on, what it did before consent /
+  after accept / after reject, a red/amber/green status and a recommended action
+- `health_score` / `health_deductions`: a 0-100 score from a transparent
+  deduction rubric, with every point traced to a named finding. Suppressed
+  (`null`) when the capture is unusable
+- `duplicate_tags` / `legacy_tags`: technologies deployed more than once with
+  different container IDs, and Universal Analytics tags still firing
 - `tracker_matrix`: **every** tracker observed, with its full pre/accept/reject
   firing pattern, request volume and classification
 - `consent_gaps`: trackers that fired **before consent** (high severity) or
@@ -196,6 +222,13 @@ exercised.
 
 ## Notes and limitations
 
+- A capture in which the Accept/Reject buttons were never found is
+  **inconclusive, not clean**. Those states are then just the pre-consent
+  capture repeated, so their agreement proves nothing about gating. The analyzer
+  sets `consent_exercised: false`, withholds the health score, and the report is
+  stamped inconclusive. This cannot be distinguished from a site that has no
+  banner at all — which is itself a finding — so both are reported rather than
+  guessed at. Re-run with explicit `--accept-selector` / `--reject-selector`.
 - A capture in which a state failed to load is **inconclusive, not clean**. The
   page never rendered, so nothing could fire: an empty gap list there means "not
   tested". `capture_har.js` exits non-zero and `analyze_har.py` sets
@@ -204,10 +237,24 @@ exercised.
   (network access, URL, browser) and re-run before reporting anything.
 - Auto-detection covers common CMPs; unusual custom banners may need manual
   selectors (see step 2).
-- `trackers.json`, `cookie_signatures.json`, `tracker_categories.json` and
-  `necessary_allowlist.json` are living lists — extend them as new services come
-  up, rather than hardcoding new logic into the scripts. A service added to a
-  signature list must also be given a category, or `smoke_test.sh` will fail.
+- `trackers.json`, `cookie_signatures.json`, `tracker_categories.json`,
+  `vendors.json` and `necessary_allowlist.json` are living lists — extend them as
+  new services come up, rather than hardcoding new logic into the scripts. A
+  service added to a signature list must also be given a category **and** a
+  vendor/purpose entry, or `smoke_test.sh` will fail.
+- The health score is a deduction rubric for prioritizing work, **not** a legal
+  grade or a certification. It is reported alongside the deductions that produced
+  it so a client can argue with the number. Never present it as a compliance
+  verdict.
+- "Pages found" counts distinct pages a technology was seen on, attributed by
+  walking the HAR in order and treating each first-party document request as a
+  page boundary. Playwright reuses one page object across navigations, so its
+  `pageref` is identical for every entry and cannot be used for this. When a
+  capture records no document entries the column reads `—` rather than 0.
+- Google consent mode is read from the `gcs` parameter: a tag pinging with
+  storage denied (`G100`) is reported as a "cookieless ping" rather than being
+  flattened into "fired". Whether such a ping is lawful before consent is a legal
+  determination, so it is surfaced as amber for review — never auto-passed.
 - Which category a service belongs to is a judgment call that should be checked
   against the client's own declared cookie categories, not assumed.
 - Per-category testing drives the CMP's own UI. Unusual panels may need explicit

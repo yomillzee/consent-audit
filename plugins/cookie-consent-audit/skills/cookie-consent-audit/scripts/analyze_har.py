@@ -19,12 +19,13 @@ import argparse
 import json
 import os
 from collections import defaultdict
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 DEFAULT_TRACKERS_PATH = os.path.join(os.path.dirname(__file__), "trackers.json")
 DEFAULT_ALLOWLIST_PATH = os.path.join(os.path.dirname(__file__), "necessary_allowlist.json")
 DEFAULT_COOKIE_SIGS_PATH = os.path.join(os.path.dirname(__file__), "cookie_signatures.json")
 DEFAULT_CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "tracker_categories.json")
+DEFAULT_VENDORS_PATH = os.path.join(os.path.dirname(__file__), "vendors.json")
 
 STATES = [("pre", "pre.har"), ("postaccept", "postaccept.har"), ("postreject", "postreject.har")]
 
@@ -167,9 +168,71 @@ def analyze_storage(path, trackers, site_domain, cookie_sigs):
     }
 
 
+# Query parameters that carry a tag/container/measurement id. Two distinct ids
+# for one service means the tag is deployed twice - a real and common finding.
+ID_PARAMS = ("tid", "id", "pixel_id", "pid")
+ID_PREFIXES = ("GTM-", "G-", "UA-", "AW-", "DC-")
+
+
+def extract_signals(url):
+    """Tag ids, consent-mode state and legacy markers carried in a request URL.
+
+    Google's consent mode reports its state in the `gcs` parameter: G100 means
+    analytics/ads storage was denied (the tag still pings, but without cookies),
+    G111 means granted. That distinction is the difference between a tag that
+    honors a rejection and one that ignores it, so it is worth surfacing rather
+    than flattening both into "fired".
+    """
+    ids, signals = set(), set()
+    try:
+        qs = parse_qs(urlparse(url).query)
+    except ValueError:
+        return ids, signals
+
+    for key in ID_PARAMS:
+        for val in qs.get(key, []):
+            if val.startswith(ID_PREFIXES) or val.isdigit():
+                ids.add(val)
+
+    for val in qs.get("gcs", []):
+        if val.startswith("G1"):
+            # Positions 2 and 3 are ad_storage and analytics_storage.
+            signals.add("consent_granted" if "1" in val[2:4] else "consent_denied")
+
+    # Universal Analytics was sunset in 2023; a still-present UA tag is dead
+    # weight that keeps collecting. v=1 is the UA measurement protocol version.
+    if any(i.startswith("UA-") for i in ids) or "analytics.js" in url:
+        signals.add("legacy")
+    elif "google-analytics.com" in url and "1" in qs.get("v", []):
+        signals.add("legacy")
+
+    return ids, signals
+
+
 def capture_error_for(summary_file, action):
     """The navigation error capture_har.js recorded for a state, if any."""
     return ((summary_file.get("states") or {}).get(action) or {}).get("error")
+
+
+def consent_not_exercised(summary_file):
+    """States whose consent button was never actually clicked.
+
+    If the banner could not be found, the accept and reject captures are just
+    the pre-consent capture again under a different name. Their agreement then
+    means nothing, and an empty gap list across all three reads as perfect
+    gating when in truth no consent choice was ever made. A site with no banner
+    at all lands here too, and should: either way, accept/reject behavior was
+    not tested. This cannot be distinguished from a banner the detector simply
+    missed, so both are reported rather than guessed at.
+    """
+    out = []
+    for action in ("accept", "reject"):
+        st = (summary_file.get("states") or {}).get(action) or {}
+        if st.get("error"):
+            continue  # already reported as a load failure
+        if not st.get("cmpMatch"):
+            out.append(action)
+    return out
 
 
 def state_is_usable(st):
@@ -204,15 +267,35 @@ def analyze_file(path, trackers, site_domain):
     tracker_hits = defaultdict(list)
     domain_counts = defaultdict(int)
     classified_domains = set()
+    tracker_pages = defaultdict(set)
+    tracker_ids = defaultdict(set)
+    tracker_signals = defaultdict(set)
+
+    # Playwright reuses one page object across navigations, so every entry shares
+    # a single pageref and it cannot tell pages apart. Entries are chronological
+    # though, so each first-party document request marks the start of a page and
+    # everything after it belongs to that page until the next one.
+    current_page = None
+    pages_seen = set()
 
     for e in entries:
         url = e["request"]["url"]
-        domain = urlparse(url).netloc
+        parsed = urlparse(url)
+        domain = parsed.netloc
         domain_counts[domain] += 1
+        if (e.get("_resourceType") == "document" and site_domain
+                and registrable_domain(domain) == site_domain):
+            current_page = parsed.path or "/"
+            pages_seen.add(current_page)
         name = classify(url, trackers)
         if name:
             tracker_hits[name].append(url)
             classified_domains.add(domain)
+            if current_page:
+                tracker_pages[name].add(current_page)
+            ids, signals = extract_signals(url)
+            tracker_ids[name] |= ids
+            tracker_signals[name] |= signals
 
     # Every unclassified domain is kept. These are the undeclared third parties a
     # full audit exists to surface, so they are never truncated.
@@ -229,6 +312,12 @@ def analyze_file(path, trackers, site_domain):
     return {
         "requests": len(entries),
         "trackers": {k: len(v) for k, v in tracker_hits.items()},
+        # None (not 0) when no document entries were recorded, so the report can
+        # say "unknown" instead of claiming a tracker was found on zero pages.
+        "pages_visited": sorted(pages_seen) or None,
+        "tracker_pages": {k: sorted(v) for k, v in tracker_pages.items()},
+        "tracker_ids": {k: sorted(v) for k, v in tracker_ids.items()},
+        "tracker_signals": {k: sorted(v) for k, v in tracker_signals.items()},
         "tracker_examples": {k: v[0] for k, v in tracker_hits.items()},
         "tracker_urls": {k: sorted(set(v)) for k, v in tracker_hits.items()},
         "unknown_domains": unknown,
@@ -238,9 +327,11 @@ def analyze_file(path, trackers, site_domain):
     }
 
 
-def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=None, category_map=None):
+def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=None,
+                   category_map=None, vendors=None):
     allowlist = set(allowlist or ())
     cookie_sigs = cookie_sigs or {}
+    vendors = {k: v for k, v in (vendors or {}).items() if not k.startswith("_")}
     service_category = invert_categories(category_map)
 
     summary_file = load_json(os.path.join(outdir, "capture-summary.json"), {})
@@ -388,6 +479,110 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     conclusive = [c for c in category_tests if c["configured"]]
     category_violations = [v for c in conclusive for v in c["violations"]]
 
+    # --- Technology inventory -------------------------------------------------
+    # One row per technology with what it did in each state, in the language a
+    # client reads rather than the analyzer's internal flags.
+    def signals_for(state_key, tracker):
+        return set(states[state_key].get("tracker_signals", {}).get(tracker, ()))
+
+    def firing_label(state_key, tracker, seen_anywhere):
+        if tracker not in states[state_key].get("trackers", {}):
+            return "Blocked" if seen_anywhere else "\u2014"
+        sig = signals_for(state_key, tracker)
+        # A tag that pings without storage is honoring the refusal; one that
+        # sends a full hit is not. Collapsing both into "fires" hides that.
+        if "consent_denied" in sig:
+            return "Cookieless ping"
+        if "consent_granted" in sig:
+            return "Full"
+        return "Fires"
+
+    technology_matrix, duplicate_tags, legacy_tags = [], [], []
+    for t in sorted(all_trackers):
+        meta = vendors.get(t) or {}
+        in_pre = t in states["pre"].get("trackers", {})
+        in_reject = t in states["postreject"].get("trackers", {})
+        allowlisted = t in allowlist
+        ids = sorted({i for k, _ in STATES for i in states[k].get("tracker_ids", {}).get(t, [])})
+        is_legacy = any("legacy" in signals_for(k, t) for k, _ in STATES)
+        is_duplicate = len(ids) > 1
+
+        # Pages are counted from whichever state saw the most of them; a tracker
+        # gated until Accept is naturally absent from the pre-consent state.
+        page_counts = [len(states[k].get("tracker_pages", {}).get(t, [])) for k, _ in STATES]
+        attributable = any(states[k].get("pages_visited") for k, _ in STATES)
+        pages_found = max(page_counts) if attributable else None
+
+        if is_legacy:
+            status, action = "red", "Remove legacy tag"
+        elif allowlisted:
+            status, action = "green", "None"
+        elif in_pre and in_reject:
+            status, action = "red", "Fix consent trigger"
+        elif in_reject:
+            status, action = "red", "Block on reject"
+        elif in_pre and "consent_denied" in signals_for("pre", t) \
+                and "consent_granted" not in signals_for("pre", t):
+            # Consent mode: the tag pinged without storage access. That is the
+            # designed behavior, not an obvious breach - but whether a
+            # cookieless ping is lawful is a legal call, not a technical one,
+            # so it is surfaced for review rather than passed or failed here.
+            status, action = "amber", "Verify consent mode configuration"
+        elif in_pre:
+            # Respects a rejection but still runs before any choice is made.
+            status, action = "amber", "Review consent category"
+        elif is_duplicate:
+            status, action = "amber", "Remove duplicate tag"
+        else:
+            status, action = "green", "None"
+        if is_duplicate and status == "red":
+            action += "; remove duplicate tag"
+
+        if is_duplicate:
+            duplicate_tags.append({"tracker": t, "ids": ids})
+        if is_legacy:
+            legacy_tags.append({"tracker": t, "ids": ids})
+
+        technology_matrix.append({
+            "technology": t,
+            "vendor": meta.get("vendor") or "Unknown",
+            "purpose": meta.get("purpose") or (service_category.get(t) or "Unclassified").replace("_", " ").title(),
+            "pages_found": pages_found,
+            "before_consent": firing_label("pre", t, True),
+            "after_accept": firing_label("postaccept", t, True),
+            "after_reject": firing_label("postreject", t, True),
+            "status": status,
+            "action": action,
+            "tag_ids": ids,
+            "allowlisted_as_necessary": allowlisted,
+        })
+
+    # --- Tracking health ------------------------------------------------------
+    # A transparent deduction rubric, not a legal grade. Every point lost maps to
+    # a finding listed in the report so the number can be argued with.
+    unclassified_pre = [d for d, v in all_third_party.items() if not v["tracker"] and v["pre"]]
+    deductions = []
+    for g in gaps:
+        if g["fired_pre_consent"] and g["fired_after_reject"]:
+            deductions.append((20, f"{g['tracker']} ignores consent entirely (fires before consent and after reject)"))
+        elif g["fired_pre_consent"]:
+            deductions.append((10, f"{g['tracker']} fires before a consent decision"))
+        else:
+            deductions.append((15, f"{g['tracker']} still fires after reject"))
+    for v in category_violations:
+        deductions.append((10, f"{v['tracker']} fired while '{v['category']}' was denied"))
+    for d in legacy_tags:
+        deductions.append((5, f"{d['tracker']} is a legacy tag still collecting"))
+    for d in duplicate_tags:
+        deductions.append((5, f"{d['tracker']} is deployed more than once ({', '.join(d['ids'])})"))
+    if unclassified_pre:
+        deductions.append((min(10, 2 * len(unclassified_pre)),
+                           f"{len(unclassified_pre)} unclassified third-party domain(s) contacted before consent"))
+    for c in cookie_gaps:
+        deductions.append((5, f"{c['name']} cookie set before a consent decision"))
+
+    health_score = max(0, 100 - sum(d[0] for d in deductions))
+
     # A state that never loaded observed nothing. Surfacing that here keeps an
     # empty gap list from being presented downstream as a clean result.
     states_inconclusive = [k for k, _ in STATES if not states[k]["usable"]]
@@ -399,6 +594,12 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         for k in states_inconclusive
     ]
     capture_usable = not states_inconclusive
+    # Clicking the banner is what makes accept/reject mean anything.
+    not_exercised = consent_not_exercised(summary_file)
+    consent_exercised = not not_exercised
+    # Only a capture that both loaded and actually exercised consent supports a
+    # verdict. Either failure alone makes an empty finding list meaningless.
+    results_authoritative = capture_usable and consent_exercised
 
     summary = {
         "site_url": site_url,
@@ -409,12 +610,22 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         # The gap lists below describe only what was actually observed. With an
         # unusable capture they are evidence of nothing, so never report them
         # as a pass while this is false.
-        "consent_gaps_authoritative": capture_usable,
+        "consent_gaps_authoritative": results_authoritative,
+        "consent_exercised": consent_exercised,
+        "consent_not_exercised_states": not_exercised,
         "pre_consent_request_count": states["pre"]["requests"],
         "post_accept_request_count": states["postaccept"]["requests"],
         "post_reject_request_count": states["postreject"]["requests"],
         "trackers_detected_total": sorted(all_trackers),
         "tracker_matrix": matrix,
+        "technology_matrix": technology_matrix,
+        "duplicate_tags": duplicate_tags,
+        "legacy_tags": legacy_tags,
+        # Suppressed entirely when the capture is unusable: a score computed
+        # from nothing is exactly the false reassurance this report avoids.
+        "health_score": health_score if results_authoritative else None,
+        "health_deductions": [{"points": pts, "reason": why} for pts, why in deductions] if results_authoritative else [],
+        "pages_visited": states["postaccept"].get("pages_visited") or states["pre"].get("pages_visited"),
         "trackers_correctly_gated": sorted(correctly_gated),
         "necessary_services_active": sorted(necessary_active),
         "consent_gaps": gaps,
@@ -443,6 +654,8 @@ def main():
                     help="JSON map of service name -> cookie name patterns (trailing * = prefix match)")
     ap.add_argument("--categories", default=DEFAULT_CATEGORIES_PATH,
                     help="JSON map of consent category -> service names, for per-category testing")
+    ap.add_argument("--vendors", default=DEFAULT_VENDORS_PATH,
+                    help="JSON map of service name -> {vendor, purpose}, for the technology inventory")
     ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST_PATH,
                     help="JSON array of tracker names LABELLED as necessary/expected pre-consent. "
                          "Affects labelling only — allowlisted services are still fully reported.")
@@ -455,7 +668,9 @@ def main():
     allowlist = set(load_json(args.allowlist, []))
     cookie_sigs = load_json(args.cookie_signatures, {})
     category_map = load_json(args.categories, {})
-    findings = build_findings(args.outdir, trackers, allowlist, args.site_url, cookie_sigs, category_map)
+    vendors = load_json(args.vendors, {})
+    findings = build_findings(args.outdir, trackers, allowlist, args.site_url, cookie_sigs,
+                              category_map, vendors)
     s = findings["summary"]
 
     out_path = args.out or os.path.join(args.outdir, "findings.json")
@@ -479,17 +694,40 @@ def main():
         print("=" * 72)
         print()
 
+    if s["health_score"] is not None:
+        print(f"Tracking health: {s['health_score']}/100")
+    if not s["consent_exercised"]:
+        print()
+        print("=" * 72)
+        print("NO CONSENT BANNER WAS EXERCISED - ACCEPT/REJECT UNTESTED")
+        print(f"  No consent button was found or clicked for: "
+              f"{', '.join(s['consent_not_exercised_states'])}")
+        print()
+        print("Those captures are the pre-consent capture again under another name,")
+        print("so agreement between them proves nothing about consent gating.")
+        print("Whatever the findings below look like, this run is NOT a pass.")
+        print("Either the site has no banner, or auto-detection missed it: re-run")
+        print("with --accept-selector / --reject-selector before reporting.")
+        print("=" * 72)
+        print()
+
     print(f"Trackers detected: {s['trackers_detected_total']}")
+    if s["duplicate_tags"]:
+        print(f"Duplicate tags: {', '.join(d['tracker'] for d in s['duplicate_tags'])}")
+    if s["legacy_tags"]:
+        print(f"Legacy tags still collecting: {', '.join(d['tracker'] for d in s['legacy_tags'])}")
 
     if s["consent_gaps"]:
         print("CONSENT GAPS FOUND:")
         for g in s["consent_gaps"]:
             print(f"  - {g['tracker']}: pre={g['fired_pre_consent']} "
                   f"post_reject={g['fired_after_reject']} severity={g['severity']}")
-    elif s["capture_usable"]:
+    elif s["consent_gaps_authoritative"]:
         print("No consent gaps found - all detected trackers were correctly gated behind Accept.")
-    else:
+    elif not s["capture_usable"]:
         print("No consent gaps listed - because nothing was observed. This is NOT a pass.")
+    else:
+        print("No consent gaps listed - but no consent choice was ever made. This is NOT a pass.")
 
     if s["necessary_services_active"]:
         print(f"Necessary services active (reported, not counted as gaps): {s['necessary_services_active']}")

@@ -119,6 +119,61 @@ if any(v.get("granted_category") == "functional" for v in s["category_violations
 if len(s["category_violations"]) != 1:
     errors.append(f"expected exactly 1 counted category violation, got {len(s['category_violations'])}")
 
+# --- technology inventory: the client-facing table ---
+tech = {r["technology"]: r for r in s["technology_matrix"]}
+if set(tech) != set(s["trackers_detected_total"]):
+    errors.append("technology_matrix must cover every detected technology")
+if any(r["vendor"] == "Unknown" for r in s["technology_matrix"]):
+    errors.append(f"every detected service needs a vendors.json entry: "
+                  f"{[r['technology'] for r in s['technology_matrix'] if r['vendor'] == 'Unknown']}")
+
+# Per-page attribution: GA4 fires on both fixture pages, Clarity only on one.
+ga = tech.get("Google Analytics (GA4/UA)", {})
+if ga.get("pages_found") != 2:
+    errors.append(f"GA4 should be found on 2 pages, got {ga.get('pages_found')}")
+if tech.get("Microsoft Clarity", {}).get("pages_found") != 1:
+    errors.append("Clarity should be found on 1 page")
+
+# Consent mode: a denied ping and a granted hit must not read the same.
+if ga.get("before_consent") != "Cookieless ping":
+    errors.append(f"GA4 pre-consent should be a cookieless ping, got {ga.get('before_consent')!r}")
+if ga.get("after_accept") != "Full":
+    errors.append(f"GA4 post-accept should be a full hit, got {ga.get('after_accept')!r}")
+if ga.get("after_reject") != "Blocked":
+    errors.append(f"GA4 post-reject should be blocked, got {ga.get('after_reject')!r}")
+# A cookieless ping is surfaced for review, never silently passed or failed.
+if ga.get("status") != "amber":
+    errors.append(f"a consent-mode ping should be amber for review, got {ga.get('status')!r}")
+
+# Duplicate tag: two GTM container ids on one site.
+dupes = {d["tracker"]: d for d in s["duplicate_tags"]}
+if "Google Tag Manager" not in dupes:
+    errors.append("two GTM container ids must be reported as a duplicate tag")
+if sorted(dupes.get("Google Tag Manager", {}).get("ids", [])) != ["GTM-SECOND", "GTM-TEST"]:
+    errors.append(f"duplicate ids wrong: {dupes.get('Google Tag Manager', {}).get('ids')}")
+gtm = tech.get("Google Tag Manager", {})
+if gtm.get("status") != "red":
+    errors.append("GTM fires before consent and after reject - must be red")
+if "duplicate" not in gtm.get("action", ""):
+    errors.append("GTM's action should also mention the duplicate container")
+
+# Correctly gated trackers stay green with no action.
+if tech.get("Meta / Facebook Pixel", {}).get("status") != "green":
+    errors.append("a correctly gated tracker must be green")
+if tech.get("reCAPTCHA", {}).get("status") != "green":
+    errors.append("an allowlisted necessary service must be green")
+
+# --- health score: a transparent rubric, every point traceable ---
+score = s["health_score"]
+if not isinstance(score, int) or not 0 <= score <= 100:
+    errors.append(f"health_score must be an int in 0..100, got {score!r}")
+if score == 100:
+    errors.append("a capture with known violations must not score 100")
+if not s["health_deductions"]:
+    errors.append("a score below 100 must itemize its deductions")
+if 100 - sum(d["points"] for d in s["health_deductions"]) != score:
+    errors.append("health_score must equal 100 minus its listed deductions")
+
 if errors:
     print("ANALYZE FAILED:")
     for e in errors:
@@ -158,6 +213,14 @@ if not any("ERR_TUNNEL_CONNECTION_FAILED" in e["error"] for e in s["capture_erro
     errors.append("the navigation error from capture-summary.json must be surfaced")
 if s["consent_gaps_authoritative"]:
     errors.append("gap findings must not be authoritative when the capture failed")
+# A score computed from nothing would be the same false reassurance in a
+# friendlier format - a broken capture must yield no number at all.
+if s["health_score"] is not None:
+    errors.append(f"a failed capture must not produce a health score, got {s['health_score']}")
+if s["health_deductions"]:
+    errors.append("a failed capture must not itemize deductions")
+if "Tracking health" in stdout:
+    errors.append("console must not print a health score for a failed capture")
 
 # The empty findings themselves are expected - what must not happen is any of
 # them being presented as a clean result.
@@ -198,7 +261,12 @@ python3 - "$PARTIAL/capture-summary.json" <<'PY2'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
-d["states"] = {"reject": {"action": "reject", "error": "page.goto: net::ERR_ABORTED at https://site.test/"}}
+d["states"] = {
+    "pre": {"action": "pre", "cmpMatch": None},
+    "accept": {"action": "accept", "cmpMatch": {"matched": "#cky-btn-accept"}},
+    "reject": {"action": "reject", "cmpMatch": {"matched": "#cky-btn-reject"},
+               "error": "page.goto: net::ERR_ABORTED at https://site.test/"},
+}
 json.dump(d, open(p, "w"), indent=2)
 PY2
 
@@ -227,6 +295,96 @@ print("partial capture failure taints the verdict while keeping real findings")
 PY2
 
 echo
+echo "== a banner that was never clicked is not a pass =="
+# The likeliest real-world false clean: auto-detection misses an unusual CMP,
+# so accept/reject are just the pre-consent capture again. All three states
+# agree, every gap list is empty, and it reads as perfect gating.
+NOBANNER="$WORK/nobanner"
+mkdir -p "$NOBANNER"
+cp "$SCRIPTS/fixtures/"*.har "$SCRIPTS/fixtures/"*.json "$NOBANNER/"
+python3 - "$NOBANNER/capture-summary.json" <<'PY2'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+for action in ("accept", "reject"):
+    d["states"][action]["cmpMatch"] = None
+json.dump(d, open(p, "w"), indent=2)
+PY2
+
+python3 "$SCRIPTS/analyze_har.py" "$NOBANNER" > "$WORK/nobanner.stdout"
+
+python3 - "$NOBANNER/findings.json" "$WORK/nobanner.stdout" <<'PY2'
+import json, sys
+s = json.load(open(sys.argv[1]))["summary"]
+stdout = open(sys.argv[2], encoding="utf-8").read()
+errors = []
+
+if s["consent_exercised"]:
+    errors.append("a capture where no consent button was clicked must not count as exercised")
+if sorted(s["consent_not_exercised_states"]) != ["accept", "reject"]:
+    errors.append(f"both decision states should be flagged, got {s['consent_not_exercised_states']}")
+if s["consent_gaps_authoritative"]:
+    errors.append("findings cannot be authoritative when no consent choice was made")
+# The pages loaded fine - this is a different failure from a dead capture.
+if not s["capture_usable"]:
+    errors.append("pages loaded, so the capture itself is usable; only consent was untested")
+# The dangerous output: a confident score off an untested banner.
+if s["health_score"] is not None:
+    errors.append(f"no score may be issued when consent was never exercised, got {s['health_score']}")
+if "No consent gaps found" in stdout:
+    errors.append("console must not print the clean-result line when the banner was never clicked")
+if "NO CONSENT BANNER WAS EXERCISED" not in stdout:
+    errors.append("console must announce that no consent banner was exercised")
+if "NOT a pass" not in stdout:
+    errors.append("console must say explicitly that this is not a pass")
+
+if errors:
+    print("UNEXERCISED-BANNER HANDLING BROKEN:")
+    for e in errors:
+        print("  -", e)
+    sys.exit(1)
+print("an unexercised consent banner is reported as inconclusive, not as clean gating")
+PY2
+
+echo
+echo "== legacy tag detection =="
+python3 - "$SCRIPTS" <<'PY2'
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location("ah", sys.argv[1] + "/analyze_har.py")
+ah = importlib.util.module_from_spec(spec); spec.loader.exec_module(ah)
+
+cases = [
+    ("https://www.google-analytics.com/collect?v=1&tid=UA-12345-1", True, "UA measurement protocol"),
+    ("https://www.google-analytics.com/analytics.js", True, "legacy analytics.js library"),
+    ("https://www.google-analytics.com/g/collect?v=2&tid=G-TEST", False, "GA4 is current"),
+    ("https://www.googletagmanager.com/gtm.js?id=GTM-TEST", False, "GTM is current"),
+]
+errors = []
+for url, expect_legacy, label in cases:
+    _, signals = ah.extract_signals(url)
+    if ("legacy" in signals) != expect_legacy:
+        errors.append(f"{label}: expected legacy={expect_legacy} for {url}")
+
+# Consent mode states must be read off the gcs parameter, not guessed.
+for url, expect in [("https://x/g/collect?gcs=G100", "consent_denied"),
+                    ("https://x/g/collect?gcs=G111", "consent_granted")]:
+    _, signals = ah.extract_signals(url)
+    if expect not in signals:
+        errors.append(f"expected {expect} from {url}, got {sorted(signals)}")
+
+ids, _ = ah.extract_signals("https://www.googletagmanager.com/gtm.js?id=GTM-TEST")
+if ids != {"GTM-TEST"}:
+    errors.append(f"container id extraction wrong: {ids}")
+
+if errors:
+    print("LEGACY/SIGNAL DETECTION BROKEN:")
+    for e in errors:
+        print("  -", e)
+    sys.exit(1)
+print("legacy UA, consent-mode and tag-id extraction all correct")
+PY2
+
+echo
 echo "== signature list coverage =="
 python3 - "$SCRIPTS" <<'PY'
 import json, os, sys
@@ -237,7 +395,12 @@ trackers, cookies = keys(load("trackers.json")), keys(load("cookie_signatures.js
 cats = load("tracker_categories.json")
 mapped = {s for k, v in cats.items() if not k.startswith("_") for s in v}
 allow = set(load("necessary_allowlist.json"))
+vendors = keys(load("vendors.json"))
 problems = []
+for missing in sorted((trackers | cookies) - vendors):
+    problems.append(f"{missing!r} has no vendor/purpose in vendors.json")
+for extra in sorted(vendors - trackers - cookies):
+    problems.append(f"{extra!r} is in vendors.json but defined in no signature list")
 for missing in sorted((trackers | cookies) - mapped):
     problems.append(f"{missing!r} has no category in tracker_categories.json")
 for extra in sorted(mapped - trackers - cookies):

@@ -12,16 +12,27 @@
  */
 const {
   Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell,
-  WidthType, ShadingType, AlignmentType, PageBreak,
+  WidthType, ShadingType, AlignmentType, PageBreak, BorderStyle,
 } = require("docx");
 const fs = require("fs");
 
-const NAVY = "1F3864";
-const LIGHT = "F2F2F2";
-const RED = "B00020";
-const AMBER = "8A6100";
-const GREEN = "1B5E20";
+// Ink, not decoration: one accent, a warm neutral for rules, and three status
+// colors that stay distinguishable in greyscale print as well as on screen.
+const NAVY = "15304F";      // headings and the cover band
+const ACCENT = "2D6A9F";    // secondary accent
+const INK = "1A1A1A";       // body text
+const MUTED = "6B7280";     // captions and secondary text
+const LIGHT = "F7F8FA";     // zebra fill
+const RULE = "DFE3E8";      // hairline rules
+const RED = "B3261E";
+const AMBER = "9A6700";
+const GREEN = "1B6E3C";
 const TOTAL_W = 9160;
+
+const NO_BORDER = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
+const HAIRLINE = { style: BorderStyle.SINGLE, size: 2, color: RULE };
+const STATUS_COLOR = { red: RED, amber: AMBER, green: GREEN };
+const STATUS_MARK = { red: "\u25CF", amber: "\u25CF", green: "\u25CF" };
 
 function h1(text) {
   return new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 300, after: 150 }, children: [new TextRun({ text, bold: true, color: NAVY })] });
@@ -35,19 +46,76 @@ function p(text, opts = {}) {
 function bullet(text, opts = {}) {
   return new Paragraph({ bullet: { level: 0 }, spacing: { after: 80 }, children: [new TextRun({ text, ...opts })] });
 }
-function cell(text, { header = false, width, shading, color } = {}) {
+function cell(text, { header = false, width, shading, color, bold, align, size } = {}) {
   return new TableCell({
     width: { size: width, type: WidthType.DXA },
     shading: shading ? { type: ShadingType.CLEAR, fill: shading } : undefined,
-    children: [new Paragraph({ children: [new TextRun({ text: String(text), bold: header, color: header ? "FFFFFF" : color, size: header ? 20 : 18 })] })],
+    margins: { top: 90, bottom: 90, left: 120, right: 120 },
+    borders: header
+      ? { top: NO_BORDER, bottom: { style: BorderStyle.SINGLE, size: 6, color: NAVY }, left: NO_BORDER, right: NO_BORDER }
+      : { top: NO_BORDER, bottom: HAIRLINE, left: NO_BORDER, right: NO_BORDER },
+    children: [new Paragraph({
+      alignment: align,
+      children: [new TextRun({
+        text: String(text),
+        bold: header || bold,
+        color: header ? NAVY : (color || INK),
+        size: size || (header ? 17 : 18),
+        allCaps: header,
+      })],
+    })],
   });
 }
+
+// A status dot reads faster than a word, and the Status column is the one a
+// client scans first. The action column carries the meaning in words.
+function statusCell(status, width) {
+  return new TableCell({
+    width: { size: width, type: WidthType.DXA },
+    margins: { top: 90, bottom: 90, left: 120, right: 120 },
+    borders: { top: NO_BORDER, bottom: HAIRLINE, left: NO_BORDER, right: NO_BORDER },
+    children: [new Paragraph({
+      alignment: AlignmentType.CENTER,
+      children: [new TextRun({ text: STATUS_MARK[status] || "\u25CB", color: STATUS_COLOR[status] || MUTED, size: 22 })],
+    })],
+  });
+}
+
 function makeTable(headers, rows, widths, rowColors = []) {
-  const headerRow = new TableRow({ tableHeader: true, children: headers.map((t, i) => cell(t, { header: true, width: widths[i], shading: NAVY })) });
+  const headerRow = new TableRow({ tableHeader: true, children: headers.map((t, i) => cell(t, { header: true, width: widths[i] })) });
   const bodyRows = rows.map((r, idx) => new TableRow({
-    children: r.map((v, i) => cell(v, { width: widths[i], shading: idx % 2 === 1 ? LIGHT : undefined, color: i === 0 ? undefined : rowColors[idx] })),
+    children: r.map((v, i) => (v && v.__status
+      ? statusCell(v.__status, widths[i])
+      : cell(v, { width: widths[i], shading: idx % 2 === 1 ? LIGHT : undefined, color: i === 0 ? undefined : rowColors[idx], bold: i === 0 }))),
   }));
-  return new Table({ width: { size: widths.reduce((a, b) => a + b, 0), type: WidthType.DXA }, columnWidths: widths, rows: [headerRow, ...bodyRows] });
+  return new Table({
+    width: { size: widths.reduce((a, b) => a + b, 0), type: WidthType.DXA },
+    columnWidths: widths,
+    borders: { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER, insideHorizontal: NO_BORDER, insideVertical: NO_BORDER },
+    rows: [headerRow, ...bodyRows],
+  });
+}
+
+// KPI band: the numbers a reader wants before they read anything else.
+function scorecard(tiles) {
+  const w = Math.floor(TOTAL_W / tiles.length);
+  return new Table({
+    width: { size: TOTAL_W, type: WidthType.DXA },
+    columnWidths: tiles.map(() => w),
+    borders: { top: NO_BORDER, bottom: NO_BORDER, left: NO_BORDER, right: NO_BORDER, insideHorizontal: NO_BORDER, insideVertical: NO_BORDER },
+    rows: [new TableRow({
+      children: tiles.map((t) => new TableCell({
+        width: { size: w, type: WidthType.DXA },
+        shading: { type: ShadingType.CLEAR, fill: LIGHT },
+        margins: { top: 160, bottom: 160, left: 140, right: 140 },
+        borders: { top: NO_BORDER, bottom: NO_BORDER, left: { style: BorderStyle.SINGLE, size: 12, color: t.color || ACCENT }, right: NO_BORDER },
+        children: [
+          new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: String(t.value), bold: true, size: 40, color: t.color || NAVY })] }),
+          new Paragraph({ children: [new TextRun({ text: t.label, size: 15, color: MUTED, allCaps: true })] }),
+        ],
+      })),
+    })],
+  });
 }
 const yn = (b) => (b ? "Yes" : "No");
 const sevColor = (s) => (s === "high" ? RED : s === "medium" ? AMBER : s === "review" ? AMBER : undefined);
@@ -79,25 +147,69 @@ function main() {
   // an older analyzer), assume the capture was fine rather than crying wolf.
   const captureUsable = summary.capture_usable !== false;
   const captureErrors = summary.capture_errors || [];
+  const consentExercised = summary.consent_exercised !== false;
+  const notExercised = summary.consent_not_exercised_states || [];
+  // Loading the pages and actually clicking the banner are separate things, and
+  // either one failing makes an empty finding list meaningless.
+  const authoritative = captureUsable && consentExercised;
+  const techMatrix = summary.technology_matrix || [];
+  const duplicates = summary.duplicate_tags || [];
+  const legacyTags = summary.legacy_tags || [];
+  const healthScore = summary.health_score;
+  const healthDeductions = summary.health_deductions || [];
+  // Necessary services are infrastructure, not marketing technology, so the
+  // headline platform count leaves them out - it is what a client recognizes.
+  const platforms = techMatrix.filter((r) => !r.allowlisted_as_necessary);
+  const scoreColor = healthScore == null ? MUTED : healthScore >= 85 ? GREEN : healthScore >= 60 ? AMBER : RED;
+  const pagesVisited = summary.pages_visited || [];
 
   const children = [
-    new Paragraph({ spacing: { before: 1400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Cookie Consent Compliance Review", bold: true, size: 44, color: NAVY })] }),
-    new Paragraph({ spacing: { before: 200 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: `${siteName} — ${siteUrl}`, size: 28, color: "444444" })] }),
-    new Paragraph({ spacing: { before: 600 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: `Prepared ${dateStr}`, size: 22, color: "666666" })] }),
-    new Paragraph({ spacing: { before: 100 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Full audit — network traffic, cookies and web storage across pre-consent, post-accept and post-reject states", size: 20, color: "666666", italics: true })] }),
+    new Paragraph({ spacing: { before: 1600, after: 80 }, children: [new TextRun({ text: "COMPLIANCE REVIEW", size: 20, color: ACCENT, bold: true, allCaps: true })] }),
+    new Paragraph({ spacing: { after: 120 }, children: [new TextRun({ text: "Cookie Consent & Tracking Audit", bold: true, size: 52, color: NAVY })] }),
+    new Paragraph({
+      spacing: { after: 400 },
+      border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: ACCENT, space: 8 } },
+      children: [new TextRun({ text: "" })],
+    }),
+    new Paragraph({ spacing: { after: 60 }, children: [new TextRun({ text: siteName, size: 30, color: INK, bold: true })] }),
+    new Paragraph({ spacing: { after: 400 }, children: [new TextRun({ text: siteUrl, size: 22, color: MUTED })] }),
+    healthScore == null
+      ? null
+      : new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `${healthScore}`, bold: true, size: 96, color: scoreColor })] }),
+    healthScore == null
+      ? null
+      : new Paragraph({ spacing: { after: 500 }, children: [new TextRun({ text: "OVERALL TRACKING HEALTH  /  100", size: 17, color: MUTED, allCaps: true })] }),
     captureUsable
       ? null
-      : new Paragraph({ spacing: { before: 400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "INCONCLUSIVE — CAPTURE INCOMPLETE, DO NOT RELY ON THESE RESULTS", bold: true, size: 26, color: RED })] }),
+      : new Paragraph({ spacing: { before: 200, after: 400 }, children: [new TextRun({ text: "INCONCLUSIVE — CAPTURE INCOMPLETE, DO NOT RELY ON THESE RESULTS", bold: true, size: 24, color: RED })] }),
+    captureUsable && !consentExercised
+      ? new Paragraph({ spacing: { before: 200, after: 400 }, children: [new TextRun({ text: "INCONCLUSIVE — NO CONSENT BANNER WAS EXERCISED", bold: true, size: 24, color: RED })] })
+      : null,
+    new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `Prepared ${dateStr}`, size: 20, color: MUTED })] }),
+    new Paragraph({ children: [new TextRun({ text: "Network traffic, cookies and web storage captured before consent, after accept, and after reject", size: 19, color: MUTED, italics: true })] }),
     new Paragraph({ children: [new PageBreak()] }),
 
     h1("Executive Summary"),
+    captureUsable
+      ? scorecard([
+          ...(healthScore == null ? [] : [{ value: `${healthScore}`, label: "Health / 100", color: scoreColor }]),
+          { value: platforms.length, label: "Platforms", color: ACCENT },
+          { value: gaps.length + catViolations.length, label: "Consent violations", color: (gaps.length + catViolations.length) ? RED : GREEN },
+          { value: duplicates.length, label: "Duplicate tags", color: duplicates.length ? AMBER : GREEN },
+          { value: legacyTags.length, label: "Legacy scripts", color: legacyTags.length ? AMBER : GREEN },
+        ])
+      : null,
+    captureUsable ? p("", { size: 10 }) : null,
     p(`This review assessed the cookie/tracking consent behavior of ${siteName} (${siteUrl}) using live captures taken before any consent decision, immediately after accepting, and immediately after rejecting. Each state used a fresh, isolated browser session and visited the same set of pages, so the three states are directly comparable.`),
     captureUsable
       ? null
       : p(`CAPTURE INCONCLUSIVE — the site failed to load in ${captureErrors.length} of 3 consent states, so this run observed no traffic to judge. Nothing below is a pass: an empty finding means "not tested", not "nothing fired". The capture must be repaired and re-run before this document is relied upon for any compliance conclusion.`, { bold: true, color: RED }),
+    captureUsable && !consentExercised
+      ? p(`CAPTURE INCONCLUSIVE — no consent banner was found or clicked for the ${notExercised.join(" and ")} state(s), so no consent choice was ever made. Those captures are the pre-consent capture again under a different name, and agreement between them says nothing about whether this site gates its trackers. Either the site presents no consent banner at all, or automatic detection missed it; both need checking by hand before any conclusion is drawn.`, { bold: true, color: RED })
+      : null,
     hasGaps
       ? p(`${gaps.length} third-party tracker(s) were found firing outside of proper consent gating.`, { bold: true, color: RED })
-      : (captureUsable
+      : (authoritative
           ? p("No tracker consent gaps were found: every detected third-party tracker only activated after the visitor accepted, and none fired before consent or after rejection.", { bold: true, color: GREEN })
           : null),
     catViolations.length
@@ -110,7 +222,7 @@ function main() {
       : null,
     cookieGapsPre.length
       ? p(`${cookieGapsPre.length} tracking or third-party cookie(s) were set before any consent decision.`, { bold: true, color: RED })
-      : (storageCaptured
+      : (storageCaptured && authoritative
           ? p("No tracking or third-party cookies were set before a consent decision.", { color: GREEN })
           : (captureUsable
               ? p("Cookie/web-storage capture was not available for this run; findings below are based on network traffic only.", { italics: true, color: AMBER })
@@ -118,6 +230,14 @@ function main() {
   ];
 
   // ---- Capture integrity: only present when something went wrong ----
+  if (captureUsable && !consentExercised) {
+    children.push(
+      h1("Capture Integrity — Consent Was Never Exercised"),
+      p(`No consent banner was found or clicked for the ${notExercised.join(" and ")} state(s). Those captures therefore repeat the pre-consent capture, and the fact that they agree with it is not evidence of correct gating.`, { bold: true, color: RED }),
+      p("Two very different situations produce this result, and they cannot be told apart automatically: the site may present no consent banner at all, which is itself a significant finding; or it may use a banner that automatic detection did not recognize, in which case the capture simply needs re-running with the banner's real selectors. Confirm which before relying on anything in this report.", { italics: true }),
+    );
+  }
+
   if (!captureUsable) {
     children.push(
       h1("Capture Integrity — Results Not Valid"),
@@ -147,10 +267,49 @@ function main() {
     ),
   );
 
-  // ---- Full tracker inventory: every tracker, every state ----
+  // ---- Technology inventory: the table a client reads first ----
+  children.push(
+    h1("Technology Inventory"),
+    p("Every technology observed, what it is for, how many pages it was found on, and what it did at each stage of the consent flow. Services labelled \"necessary\" are expected to run before consent and are not counted in the headline violation total, but are listed here in full so the classification can be reviewed rather than taken on trust."),
+  );
+  if (techMatrix.length) {
+    children.push(makeTable(
+      ["Technology", "Vendor", "Purpose", "Pages", "Before consent", "After accept", "After reject", "Status", "Action"],
+      techMatrix.map((r) => [
+        r.technology, r.vendor, r.purpose,
+        r.pages_found == null ? "\u2014" : String(r.pages_found),
+        r.before_consent, r.after_accept, r.after_reject,
+        { __status: r.status },
+        r.action,
+      ]),
+      [1580, 900, 1100, 520, 1150, 900, 900, 560, 1550]
+    ));
+    children.push(p("\u25CF red = fires when it should not, or is obsolete   \u25CF amber = review needed   \u25CF green = behaving correctly", { size: 16, color: MUTED }));
+    if (pagesVisited.length) {
+      children.push(p(`Pages crawled in each state: ${pagesVisited.join(", ")}. "Pages" counts the distinct pages a technology was observed on; a technology gated until Accept is naturally absent from the pre-consent crawl.`, { size: 16, color: MUTED }));
+    } else {
+      children.push(p("Per-page attribution was not available for this capture, so the Pages column is shown as \u2014.", { size: 16, color: MUTED, italics: true }));
+    }
+    if (duplicates.length) {
+      children.push(
+        h2("Duplicate Deployments"),
+        p("These technologies were loaded more than once with different container or measurement IDs. Duplicate tags double-count traffic and can fire outside the consent logic attached to the primary tag."),
+        makeTable(["Technology", "IDs found"], duplicates.map((d) => [d.tracker, d.ids.join(", ")]), [3000, 6160]),
+      );
+    }
+    if (legacyTags.length) {
+      children.push(
+        h2("Legacy Tags Still Collecting"),
+        p("Universal Analytics stopped processing data in 2023. A tag still firing collects nothing useful while continuing to set cookies and contact the vendor, so it carries the compliance cost of tracking with none of the benefit.", { color: AMBER }),
+        makeTable(["Technology", "IDs found"], legacyTags.map((d) => [d.tracker, d.ids.join(", ") || "\u2014"]), [3000, 6160]),
+      );
+    }
+  }
+
+  // ---- Underlying firing matrix, kept for full disclosure ----
   children.push(
     h1("Full Tracker Inventory"),
-    p("Every tracker observed in any state, with its complete firing pattern. Services labelled \"necessary\" are expected to run pre-consent and are not counted in the headline gap total, but are listed here in full so the classification can be reviewed rather than taken on trust."),
+    p("The same technologies as the table above, expressed as the raw firing pattern the analysis is derived from."),
   );
   if (matrix.length) {
     children.push(makeTable(
@@ -310,8 +469,22 @@ function main() {
     : p("No third-party domains were contacted."));
 
   // ---- Recommendations ----
+  if (healthScore != null) {
+    children.push(
+      h1("How the Health Score Was Calculated"),
+      p("The score is a transparent deduction rubric, not a legal grade or a certification. It starts at 100 and subtracts for each finding below, so every point lost maps to something named in this report and can be argued with. A high score is not a statement of legal compliance, which depends on jurisdiction and on how the site declares its own cookie categories."),
+    );
+    children.push(healthDeductions.length
+      ? makeTable(["Points", "Finding"], healthDeductions.map((d) => [`-${d.points}`, d.reason]), [1200, 7960])
+      : p("No deductions were applied: no consent gaps, duplicate tags or legacy tags were observed.", { color: GREEN }));
+    children.push(p(`Starting score 100, less ${healthDeductions.reduce((a, d) => a + d.points, 0)} points, gives ${healthScore}.`, { bold: true }));
+  }
+
   children.push(h1("Recommendations"));
   const recs = [];
+  if (captureUsable && !consentExercised) {
+    recs.push(bullet(`Establish whether ${siteName} presents a consent banner at all. If it does, re-run this audit with explicit --accept-selector and --reject-selector values so the banner is actually exercised; if it does not, that absence is the finding, and the pre-consent behavior recorded here is what every visitor gets.`));
+  }
   if (!captureUsable) {
     recs.push(bullet(`Re-run the capture: the site did not load in ${captureErrors.length} of 3 consent states, so this audit reached no conclusion. Every other item in this report is limited to what the states that did load revealed.`));
   }
@@ -325,6 +498,16 @@ function main() {
   }
   if (catInconclusive.length) {
     recs.push(bullet(`Re-test the inconclusive scenario(s) (${catInconclusive.map((c) => c.granted).join(", ")}) with explicit preference-panel selectors, or manually. They are untested, not passing.`));
+  }
+  if (duplicates.length) {
+    recs.push(bullet(`Remove the duplicate deployment of ${duplicates.map((d) => d.tracker).join(", ")}. Two containers double-count traffic, and the second one is rarely wired into the same consent logic as the first.`));
+  }
+  if (legacyTags.length) {
+    recs.push(bullet(`Remove the legacy tag(s) for ${legacyTags.map((d) => d.tracker).join(", ")}. Universal Analytics no longer processes data, so these collect nothing while still setting cookies and contacting the vendor.`));
+  }
+  const consentModeRows = techMatrix.filter((r) => r.action === "Verify consent mode configuration");
+  if (consentModeRows.length) {
+    recs.push(bullet(`Confirm with counsel whether the cookieless pings sent before consent by ${consentModeRows.map((r) => r.technology).join(", ")} are acceptable in the relevant jurisdictions. These requests carry no storage access, which is consent mode working as designed, but they are still a contact with the vendor before the visitor has chosen.`));
   }
   if (cookieGapsPre.length) {
     recs.push(bullet("Remove or defer the cookies listed under 'Cookies Set Before Consent'. Note that blocking a tracker's network requests does not by itself stop a cookie already written by inline JavaScript."));

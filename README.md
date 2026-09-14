@@ -16,6 +16,20 @@ kept out of the headline gap count, but are still shown in full with their
 firing pattern, so the classification can be reviewed rather than taken on
 trust.
 
+## Where this runs
+
+**On a computer, not in a browser.** The audit drives a real Chromium against the
+live site and every tracker domain it calls, so it needs ordinary internet
+access: Claude Code on a Mac, Windows or Linux machine, or a CI runner with open
+egress.
+
+It cannot run in [Claude Code on the web](https://claude.ai/code) or any other
+sandboxed cloud session. Those environments route traffic through a policy proxy
+that refuses hosts outside an allowlist, and the audit fails at the first page
+load. Allowlisting the target site alone does not help either — the whole point
+is watching which third-party trackers fire, and they all live on domains you
+cannot know in advance.
+
 ## Setup (each team member, once)
 
 Requires [Claude Code](https://claude.com/product/claude-code) installed locally,
@@ -51,12 +65,52 @@ If the prompt doesn't appear, fall back to the two commands above.
 
 ## Using it
 
-Ask Claude Code in plain language:
+Three ways, all equivalent.
+
+**Slash command** — the shortest:
+
+```
+/cookie-audit https://example.com "Example Inc"
+```
+
+**Plain language** — ask Claude Code:
 
 > Audit cookie consent on https://example.com
 
-Claude runs capture → analyze → report and hands back
-`Cookie_Consent_Compliance_Review.docx` along with a plain-English summary.
+**One command, no Claude** — for a terminal or CI:
+
+```bash
+./plugins/cookie-consent-audit/skills/cookie-consent-audit/scripts/run_audit.sh \
+  https://example.com "Example Inc"
+```
+
+It installs its dependencies and Chromium on first run, captures every consent
+state, analyzes, and writes the report. Extra flags pass through to the capture,
+so `--paths "/,/about,/pricing"` and `--skip-categories` work as expected.
+
+All three produce `<Site>_Cookie_Consent_Review.docx` plus the raw
+`findings.json`, and a plain-English summary.
+
+## Reading the result
+
+The report leads with an overall tracking health score and a technology
+inventory: every tool found, its vendor and purpose, how many pages it was on,
+what it did before consent / after accept / after reject, and what to do about
+it.
+
+Two warnings mean **the run proved nothing** and must be fixed before the report
+is sent to anyone:
+
+| Warning | What happened | Fix |
+| --- | --- | --- |
+| `CAPTURE INCONCLUSIVE` | A page never loaded, so nothing could be observed | Check network access and the URL, then re-run |
+| `NO CONSENT BANNER WAS EXERCISED` | The Accept/Reject buttons were never found, so no consent choice was made | Find the real selectors and re-run with `--accept-selector` / `--reject-selector` |
+
+In both cases the report is stamped inconclusive and no health score is issued,
+because an empty finding list there means "not tested", not "nothing fired".
+
+The health score is a transparent deduction rubric for prioritizing work — the
+report shows its arithmetic — **not** a legal grade or a certification.
 
 Useful things to ask for:
 
