@@ -147,6 +147,11 @@ function main() {
   // an older analyzer), assume the capture was fine rather than crying wolf.
   const captureUsable = summary.capture_usable !== false;
   const captureErrors = summary.capture_errors || [];
+  const consentExercised = summary.consent_exercised !== false;
+  const notExercised = summary.consent_not_exercised_states || [];
+  // Loading the pages and actually clicking the banner are separate things, and
+  // either one failing makes an empty finding list meaningless.
+  const authoritative = captureUsable && consentExercised;
   const techMatrix = summary.technology_matrix || [];
   const duplicates = summary.duplicate_tags || [];
   const legacyTags = summary.legacy_tags || [];
@@ -177,6 +182,9 @@ function main() {
     captureUsable
       ? null
       : new Paragraph({ spacing: { before: 200, after: 400 }, children: [new TextRun({ text: "INCONCLUSIVE — CAPTURE INCOMPLETE, DO NOT RELY ON THESE RESULTS", bold: true, size: 24, color: RED })] }),
+    captureUsable && !consentExercised
+      ? new Paragraph({ spacing: { before: 200, after: 400 }, children: [new TextRun({ text: "INCONCLUSIVE — NO CONSENT BANNER WAS EXERCISED", bold: true, size: 24, color: RED })] })
+      : null,
     new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `Prepared ${dateStr}`, size: 20, color: MUTED })] }),
     new Paragraph({ children: [new TextRun({ text: "Network traffic, cookies and web storage captured before consent, after accept, and after reject", size: 19, color: MUTED, italics: true })] }),
     new Paragraph({ children: [new PageBreak()] }),
@@ -196,9 +204,12 @@ function main() {
     captureUsable
       ? null
       : p(`CAPTURE INCONCLUSIVE — the site failed to load in ${captureErrors.length} of 3 consent states, so this run observed no traffic to judge. Nothing below is a pass: an empty finding means "not tested", not "nothing fired". The capture must be repaired and re-run before this document is relied upon for any compliance conclusion.`, { bold: true, color: RED }),
+    captureUsable && !consentExercised
+      ? p(`CAPTURE INCONCLUSIVE — no consent banner was found or clicked for the ${notExercised.join(" and ")} state(s), so no consent choice was ever made. Those captures are the pre-consent capture again under a different name, and agreement between them says nothing about whether this site gates its trackers. Either the site presents no consent banner at all, or automatic detection missed it; both need checking by hand before any conclusion is drawn.`, { bold: true, color: RED })
+      : null,
     hasGaps
       ? p(`${gaps.length} third-party tracker(s) were found firing outside of proper consent gating.`, { bold: true, color: RED })
-      : (captureUsable
+      : (authoritative
           ? p("No tracker consent gaps were found: every detected third-party tracker only activated after the visitor accepted, and none fired before consent or after rejection.", { bold: true, color: GREEN })
           : null),
     catViolations.length
@@ -211,7 +222,7 @@ function main() {
       : null,
     cookieGapsPre.length
       ? p(`${cookieGapsPre.length} tracking or third-party cookie(s) were set before any consent decision.`, { bold: true, color: RED })
-      : (storageCaptured
+      : (storageCaptured && authoritative
           ? p("No tracking or third-party cookies were set before a consent decision.", { color: GREEN })
           : (captureUsable
               ? p("Cookie/web-storage capture was not available for this run; findings below are based on network traffic only.", { italics: true, color: AMBER })
@@ -219,6 +230,14 @@ function main() {
   ];
 
   // ---- Capture integrity: only present when something went wrong ----
+  if (captureUsable && !consentExercised) {
+    children.push(
+      h1("Capture Integrity — Consent Was Never Exercised"),
+      p(`No consent banner was found or clicked for the ${notExercised.join(" and ")} state(s). Those captures therefore repeat the pre-consent capture, and the fact that they agree with it is not evidence of correct gating.`, { bold: true, color: RED }),
+      p("Two very different situations produce this result, and they cannot be told apart automatically: the site may present no consent banner at all, which is itself a significant finding; or it may use a banner that automatic detection did not recognize, in which case the capture simply needs re-running with the banner's real selectors. Confirm which before relying on anything in this report.", { italics: true }),
+    );
+  }
+
   if (!captureUsable) {
     children.push(
       h1("Capture Integrity — Results Not Valid"),
@@ -463,6 +482,9 @@ function main() {
 
   children.push(h1("Recommendations"));
   const recs = [];
+  if (captureUsable && !consentExercised) {
+    recs.push(bullet(`Establish whether ${siteName} presents a consent banner at all. If it does, re-run this audit with explicit --accept-selector and --reject-selector values so the banner is actually exercised; if it does not, that absence is the finding, and the pre-consent behavior recorded here is what every visitor gets.`));
+  }
   if (!captureUsable) {
     recs.push(bullet(`Re-run the capture: the site did not load in ${captureErrors.length} of 3 consent states, so this audit reached no conclusion. Every other item in this report is limited to what the states that did load revealed.`));
   }

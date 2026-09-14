@@ -29,6 +29,24 @@ machine, or a CI runner with open network access, both work.
 Python 3 (standard library only) is used for `analyze_har.py`; Node 18+ for the
 other two scripts.
 
+## Quick path
+
+For a routine audit, one command does capture, analysis and report, installing
+what it needs on first run:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/skills/cookie-consent-audit/scripts/run_audit.sh" <url> "<Site Name>"
+```
+
+Extra arguments pass through to `capture_har.js` (`--paths`, `--skip-categories`,
+`--accept-selector`, ...). It stops rather than analyzing a capture that failed
+to load. Use the step-by-step workflow below when a run needs debugging, or when
+the banner needs explicit selectors.
+
+Whichever path you take, check the console before reporting: `CAPTURE
+INCONCLUSIVE` or `NO CONSENT BANNER WAS EXERCISED` both mean the run proved
+nothing, and neither may be reported as a clean result.
+
 ## Workflow
 
 ### 0. Locate the scripts and install dependencies
@@ -204,6 +222,13 @@ exercised.
 
 ## Notes and limitations
 
+- A capture in which the Accept/Reject buttons were never found is
+  **inconclusive, not clean**. Those states are then just the pre-consent
+  capture repeated, so their agreement proves nothing about gating. The analyzer
+  sets `consent_exercised: false`, withholds the health score, and the report is
+  stamped inconclusive. This cannot be distinguished from a site that has no
+  banner at all — which is itself a finding — so both are reported rather than
+  guessed at. Re-run with explicit `--accept-selector` / `--reject-selector`.
 - A capture in which a state failed to load is **inconclusive, not clean**. The
   page never rendered, so nothing could fire: an empty gap list there means "not
   tested". `capture_har.js` exits non-zero and `analyze_har.py` sets

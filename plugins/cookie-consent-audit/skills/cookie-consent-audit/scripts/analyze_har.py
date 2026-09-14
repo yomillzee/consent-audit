@@ -214,6 +214,27 @@ def capture_error_for(summary_file, action):
     return ((summary_file.get("states") or {}).get(action) or {}).get("error")
 
 
+def consent_not_exercised(summary_file):
+    """States whose consent button was never actually clicked.
+
+    If the banner could not be found, the accept and reject captures are just
+    the pre-consent capture again under a different name. Their agreement then
+    means nothing, and an empty gap list across all three reads as perfect
+    gating when in truth no consent choice was ever made. A site with no banner
+    at all lands here too, and should: either way, accept/reject behavior was
+    not tested. This cannot be distinguished from a banner the detector simply
+    missed, so both are reported rather than guessed at.
+    """
+    out = []
+    for action in ("accept", "reject"):
+        st = (summary_file.get("states") or {}).get(action) or {}
+        if st.get("error"):
+            continue  # already reported as a load failure
+        if not st.get("cmpMatch"):
+            out.append(action)
+    return out
+
+
 def state_is_usable(st):
     """Whether a state observed enough to support any conclusion.
 
@@ -573,6 +594,12 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         for k in states_inconclusive
     ]
     capture_usable = not states_inconclusive
+    # Clicking the banner is what makes accept/reject mean anything.
+    not_exercised = consent_not_exercised(summary_file)
+    consent_exercised = not not_exercised
+    # Only a capture that both loaded and actually exercised consent supports a
+    # verdict. Either failure alone makes an empty finding list meaningless.
+    results_authoritative = capture_usable and consent_exercised
 
     summary = {
         "site_url": site_url,
@@ -583,7 +610,9 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         # The gap lists below describe only what was actually observed. With an
         # unusable capture they are evidence of nothing, so never report them
         # as a pass while this is false.
-        "consent_gaps_authoritative": capture_usable,
+        "consent_gaps_authoritative": results_authoritative,
+        "consent_exercised": consent_exercised,
+        "consent_not_exercised_states": not_exercised,
         "pre_consent_request_count": states["pre"]["requests"],
         "post_accept_request_count": states["postaccept"]["requests"],
         "post_reject_request_count": states["postreject"]["requests"],
@@ -594,8 +623,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         "legacy_tags": legacy_tags,
         # Suppressed entirely when the capture is unusable: a score computed
         # from nothing is exactly the false reassurance this report avoids.
-        "health_score": health_score if capture_usable else None,
-        "health_deductions": [{"points": pts, "reason": why} for pts, why in deductions] if capture_usable else [],
+        "health_score": health_score if results_authoritative else None,
+        "health_deductions": [{"points": pts, "reason": why} for pts, why in deductions] if results_authoritative else [],
         "pages_visited": states["postaccept"].get("pages_visited") or states["pre"].get("pages_visited"),
         "trackers_correctly_gated": sorted(correctly_gated),
         "necessary_services_active": sorted(necessary_active),
@@ -667,6 +696,21 @@ def main():
 
     if s["health_score"] is not None:
         print(f"Tracking health: {s['health_score']}/100")
+    if not s["consent_exercised"]:
+        print()
+        print("=" * 72)
+        print("NO CONSENT BANNER WAS EXERCISED - ACCEPT/REJECT UNTESTED")
+        print(f"  No consent button was found or clicked for: "
+              f"{', '.join(s['consent_not_exercised_states'])}")
+        print()
+        print("Those captures are the pre-consent capture again under another name,")
+        print("so agreement between them proves nothing about consent gating.")
+        print("Whatever the findings below look like, this run is NOT a pass.")
+        print("Either the site has no banner, or auto-detection missed it: re-run")
+        print("with --accept-selector / --reject-selector before reporting.")
+        print("=" * 72)
+        print()
+
     print(f"Trackers detected: {s['trackers_detected_total']}")
     if s["duplicate_tags"]:
         print(f"Duplicate tags: {', '.join(d['tracker'] for d in s['duplicate_tags'])}")
@@ -678,10 +722,12 @@ def main():
         for g in s["consent_gaps"]:
             print(f"  - {g['tracker']}: pre={g['fired_pre_consent']} "
                   f"post_reject={g['fired_after_reject']} severity={g['severity']}")
-    elif s["capture_usable"]:
+    elif s["consent_gaps_authoritative"]:
         print("No consent gaps found - all detected trackers were correctly gated behind Accept.")
-    else:
+    elif not s["capture_usable"]:
         print("No consent gaps listed - because nothing was observed. This is NOT a pass.")
+    else:
+        print("No consent gaps listed - but no consent choice was ever made. This is NOT a pass.")
 
     if s["necessary_services_active"]:
         print(f"Necessary services active (reported, not counted as gaps): {s['necessary_services_active']}")

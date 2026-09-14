@@ -1,5 +1,29 @@
 {
   "url": "https://site.test/",
   "capturedAt": "2026-01-01T00:00:00.000Z",
-  "states": {}
+  "states": {
+    "pre": {
+      "url": "https://site.test/",
+      "action": "pre",
+      "cmpMatch": null,
+      "harFile": "out/pre.har"
+    },
+    "accept": {
+      "url": "https://site.test/",
+      "action": "accept",
+      "cmpMatch": {
+        "matched": "#cky-btn-accept"
+      },
+      "harFile": "out/postaccept.har"
+    },
+    "reject": {
+      "url": "https://site.test/",
+      "action": "reject",
+      "cmpMatch": {
+        "matched": "#cky-btn-reject"
+      },
+      "harFile": "out/postreject.har"
+    }
+  },
+  "cmp": "cookieyes"
 }

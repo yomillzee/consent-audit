@@ -261,7 +261,12 @@ python3 - "$PARTIAL/capture-summary.json" <<'PY2'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
-d["states"] = {"reject": {"action": "reject", "error": "page.goto: net::ERR_ABORTED at https://site.test/"}}
+d["states"] = {
+    "pre": {"action": "pre", "cmpMatch": None},
+    "accept": {"action": "accept", "cmpMatch": {"matched": "#cky-btn-accept"}},
+    "reject": {"action": "reject", "cmpMatch": {"matched": "#cky-btn-reject"},
+               "error": "page.goto: net::ERR_ABORTED at https://site.test/"},
+}
 json.dump(d, open(p, "w"), indent=2)
 PY2
 
@@ -287,6 +292,58 @@ if errors:
         print("  -", e)
     sys.exit(1)
 print("partial capture failure taints the verdict while keeping real findings")
+PY2
+
+echo
+echo "== a banner that was never clicked is not a pass =="
+# The likeliest real-world false clean: auto-detection misses an unusual CMP,
+# so accept/reject are just the pre-consent capture again. All three states
+# agree, every gap list is empty, and it reads as perfect gating.
+NOBANNER="$WORK/nobanner"
+mkdir -p "$NOBANNER"
+cp "$SCRIPTS/fixtures/"*.har "$SCRIPTS/fixtures/"*.json "$NOBANNER/"
+python3 - "$NOBANNER/capture-summary.json" <<'PY2'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+for action in ("accept", "reject"):
+    d["states"][action]["cmpMatch"] = None
+json.dump(d, open(p, "w"), indent=2)
+PY2
+
+python3 "$SCRIPTS/analyze_har.py" "$NOBANNER" > "$WORK/nobanner.stdout"
+
+python3 - "$NOBANNER/findings.json" "$WORK/nobanner.stdout" <<'PY2'
+import json, sys
+s = json.load(open(sys.argv[1]))["summary"]
+stdout = open(sys.argv[2], encoding="utf-8").read()
+errors = []
+
+if s["consent_exercised"]:
+    errors.append("a capture where no consent button was clicked must not count as exercised")
+if sorted(s["consent_not_exercised_states"]) != ["accept", "reject"]:
+    errors.append(f"both decision states should be flagged, got {s['consent_not_exercised_states']}")
+if s["consent_gaps_authoritative"]:
+    errors.append("findings cannot be authoritative when no consent choice was made")
+# The pages loaded fine - this is a different failure from a dead capture.
+if not s["capture_usable"]:
+    errors.append("pages loaded, so the capture itself is usable; only consent was untested")
+# The dangerous output: a confident score off an untested banner.
+if s["health_score"] is not None:
+    errors.append(f"no score may be issued when consent was never exercised, got {s['health_score']}")
+if "No consent gaps found" in stdout:
+    errors.append("console must not print the clean-result line when the banner was never clicked")
+if "NO CONSENT BANNER WAS EXERCISED" not in stdout:
+    errors.append("console must announce that no consent banner was exercised")
+if "NOT a pass" not in stdout:
+    errors.append("console must say explicitly that this is not a pass")
+
+if errors:
+    print("UNEXERCISED-BANNER HANDLING BROKEN:")
+    for e in errors:
+        print("  -", e)
+    sys.exit(1)
+print("an unexercised consent banner is reported as inconclusive, not as clean gating")
 PY2
 
 echo
