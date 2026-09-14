@@ -5,9 +5,10 @@ runs a cookie/tracking consent compliance audit on any website and produces a
 client-ready Word report.
 
 Given a URL, it captures live network traffic **plus cookies, localStorage and
-sessionStorage** in three isolated browser sessions (no consent decision, after
-"Accept All", after "Reject All"), classifies everything observed, and flags
-anything that fired or was stored before consent or after rejection.
+sessionStorage** in isolated browser sessions — no consent decision, after
+"Accept All", after "Reject All", and **once per individual consent category** —
+classifies everything observed, and flags anything that fired or was stored
+against the visitor's stated choice.
 
 It is a full-disclosure audit: every tracker, cookie and third-party domain seen
 is reported. Services classified as strictly necessary are labelled as such and
@@ -64,6 +65,8 @@ Useful things to ask for:
 - `...and check /about and /pricing too` — captures extra paths.
 - `The banner wasn't detected, the accept button is #cky-btn-accept` — passes
   explicit selectors when auto-detection misses.
+- `Skip the per-category tests, just do accept and reject` — faster, since
+  per-category testing adds one capture per category.
 
 ## What gets reported
 
@@ -73,11 +76,29 @@ Useful things to ask for:
 | Scope of this audit | Requests, trackers, third-party domains and cookies per state |
 | Full tracker inventory | Every tracker observed, its firing pattern across all three states, request volume and classification |
 | Consent gap analysis | Trackers that fired pre-consent (high) or after reject (medium) |
+| Per-category consent testing | One scenario per category: what fired when only that category was granted, which toggles were applied, and any violations |
 | Services classified as necessary | Allowlisted services shown with their actual firing pattern, for sign-off |
 | Cookies and web storage | Cookies set before consent, cookies surviving reject, and the complete cookie / localStorage / sessionStorage inventory per state |
 | All third-party domains | Every non-first-party domain contacted, with unclassified ones flagged |
 | Recommendations | Tailored to the findings |
 | Methodology | How the capture was performed, and its limitations |
+
+### Why per-category testing matters
+
+Accepting everything and rejecting everything only tests the two extremes. The
+common real-world failure sits in between: a visitor allows analytics but
+declines advertising, and the site fires the advertising tags anyway because
+they were never registered with the consent platform under the right category.
+
+The audit opens the banner's own preferences panel, grants exactly one category,
+denies the rest, saves, and re-captures — once per category. A tracker from a
+denied category that still fires is an unambiguous violation of a promise the
+site made to the visitor.
+
+**A scenario that could not be driven is reported as inconclusive, never as a
+pass.** An empty violation list is only meaningful if the toggles demonstrably
+applied, so each scenario records which controls it found and what it set them
+to, and the report prints that evidence alongside the verdict.
 
 ### Why cookies are captured separately from network traffic
 
@@ -103,6 +124,7 @@ plugins/cookie-consent-audit/
       generate_report.js                .docx report generation
       trackers.json                     URL signatures for network requests
       cookie_signatures.json            cookie-name signatures (first-party cookies)
+      tracker_categories.json           service -> consent category mapping
       necessary_allowlist.json          services labelled as expected pre-consent
       smoke_test.sh                     offline end-to-end check
 ```
@@ -122,8 +144,19 @@ trailing `*` matches by prefix:
 "Vendor Name": ["_vnd_id", "_vnd_ses*"]
 ```
 
-Use the same display name in both files so network and cookie evidence for one
-service line up in the report. No code changes are needed to add a service.
+`tracker_categories.json` assigns each service to a consent category
+(`necessary`, `functional`, `analytics`, `advertising`, `tag_manager`), which is
+what per-category testing checks against.
+
+Use the same display name in all three files so network evidence, cookie
+evidence and category verdicts line up for one service. No code changes are
+needed to add a service — but a service missing a category will fail
+`smoke_test.sh`, which checks the lists stay in sync.
+
+Category assignment is a judgment call: check it against the client's own
+declared cookie categories rather than assuming. `tag_manager` is treated as
+informational rather than a violation, since a container tag loading is not
+itself tracking — what it goes on to load is judged on its own.
 
 `necessary_allowlist.json` lists services that are *expected* to run before
 consent (CAPTCHA, anti-spam, fraud prevention, payments, the consent banner's
@@ -143,8 +176,10 @@ benefits.
 bash plugins/cookie-consent-audit/skills/cookie-consent-audit/scripts/smoke_test.sh
 ```
 
-Runs the analyze → report pipeline against built-in fixtures. No network or
-browser needed, so it isolates a broken install from a browser/network problem.
+Runs the analyze → report pipeline against built-in fixtures with known
+outcomes, and checks the signature lists haven't drifted out of sync. No network
+or browser needed, so it isolates a broken install from a browser/network
+problem.
 
 ## Why a Claude Code plugin and not a claude.ai skill
 

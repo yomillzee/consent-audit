@@ -78,12 +78,79 @@ tp = [c for c in f["states"]["postaccept"]["storage"]["cookies"] if c["third_par
 if {c["name"] for c in tp} != {"third_party_id"}:
     errors.append(f"third-party cookie detection wrong: {[c['name'] for c in tp]}")
 
+# --- per-category consent testing ---
+tests = {c["scenario"]: c for c in s["category_tests"]}
+if set(tests) != {"analytics", "advertising", "functional"}:
+    errors.append(f"expected 3 category scenarios, got {sorted(tests)}")
+
+# analytics granted: Meta Pixel (advertising) leaks through -> 1 violation.
+an = tests.get("analytics", {})
+if not an.get("configured"):
+    errors.append("analytics scenario should be configured")
+if [v["tracker"] for v in an.get("violations", [])] != ["Meta / Facebook Pixel"]:
+    errors.append(f"analytics violations wrong: {[v['tracker'] for v in an.get('violations', [])]}")
+if [e["tracker"] for e in an.get("expected_present", [])] != ["Google Analytics (GA4/UA)"]:
+    errors.append("GA should be expected_present when analytics is granted")
+# GTM is informational, reCAPTCHA is necessary: neither is a violation.
+if any(v["tracker"] in ("Google Tag Manager", "reCAPTCHA") for v in an.get("violations", [])):
+    errors.append("tag manager / necessary services must not count as category violations")
+if [i["tracker"] for i in an.get("informational", [])] != ["Google Tag Manager"]:
+    errors.append("GTM should be reported as informational")
+
+# advertising granted: Meta Pixel is in the granted category -> clean pass.
+ad = tests.get("advertising", {})
+if not ad.get("configured") or ad.get("violations"):
+    errors.append(f"advertising scenario should pass cleanly, got {ad.get('violations')}")
+
+# THE CRITICAL CASE: nothing fired, but the panel could not be saved. Zero
+# violations here must read as inconclusive, never as a pass.
+fn = tests.get("functional", {})
+if fn.get("configured"):
+    errors.append("functional scenario must be inconclusive (save button was not found)")
+if fn.get("violations"):
+    errors.append("inconclusive scenario should not report violations")
+if not fn.get("inconclusive_reason"):
+    errors.append("inconclusive scenario must carry a reason")
+if "functional" not in s["category_scenarios_inconclusive"]:
+    errors.append("functional must be listed as inconclusive")
+# Inconclusive violations must never reach the headline tally.
+if any(v.get("granted_category") == "functional" for v in s["category_violations"]):
+    errors.append("inconclusive scenarios must be excluded from category_violations")
+if len(s["category_violations"]) != 1:
+    errors.append(f"expected exactly 1 counted category violation, got {len(s['category_violations'])}")
+
 if errors:
     print("ANALYZE FAILED:")
     for e in errors:
         print("  -", e)
     sys.exit(1)
-print("analyze output matches expectations (network gaps, tracker matrix, cookies, third-party)")
+print("analyze output matches expectations (network gaps, tracker matrix, cookies, third-party, per-category)")
+PY
+
+echo
+echo "== signature list coverage =="
+python3 - "$SCRIPTS" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+load = lambda n: json.load(open(os.path.join(d, n), encoding="utf-8"))
+keys = lambda m: {k for k in m if not k.startswith("_")}
+trackers, cookies = keys(load("trackers.json")), keys(load("cookie_signatures.json"))
+cats = load("tracker_categories.json")
+mapped = {s for k, v in cats.items() if not k.startswith("_") for s in v}
+allow = set(load("necessary_allowlist.json"))
+problems = []
+for missing in sorted((trackers | cookies) - mapped):
+    problems.append(f"{missing!r} has no category in tracker_categories.json")
+for extra in sorted(mapped - trackers - cookies):
+    problems.append(f"{extra!r} is categorized but defined in no signature list")
+for a in sorted(allow - mapped):
+    problems.append(f"{a!r} is allowlisted but has no category")
+if problems:
+    print("SIGNATURE LISTS OUT OF SYNC:")
+    for p in problems:
+        print("  -", p)
+    sys.exit(1)
+print(f"{len(trackers | cookies)} services, all categorized and consistent")
 PY
 
 echo

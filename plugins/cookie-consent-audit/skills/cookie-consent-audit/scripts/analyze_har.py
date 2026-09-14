@@ -24,8 +24,13 @@ from urllib.parse import urlparse
 DEFAULT_TRACKERS_PATH = os.path.join(os.path.dirname(__file__), "trackers.json")
 DEFAULT_ALLOWLIST_PATH = os.path.join(os.path.dirname(__file__), "necessary_allowlist.json")
 DEFAULT_COOKIE_SIGS_PATH = os.path.join(os.path.dirname(__file__), "cookie_signatures.json")
+DEFAULT_CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "tracker_categories.json")
 
 STATES = [("pre", "pre.har"), ("postaccept", "postaccept.har"), ("postreject", "postreject.har")]
+
+# A container tag loading is not itself tracking, so it is reported but not
+# counted as a per-category violation; what it loads is judged on its own.
+INFORMATIONAL_CATEGORIES = {"tag_manager"}
 
 # Cookies living longer than this are called out; 13 months is the common
 # regulator guidance ceiling, and 6 months is a widely used stricter bar.
@@ -58,6 +63,28 @@ def registrable_domain(host):
     if ".".join(parts[-2:]) in TWO_PART_TLDS and len(parts) >= 3:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:])
+
+
+def invert_categories(category_map):
+    """{'analytics': ['GA4', ...]} -> {'GA4': 'analytics', ...}"""
+    out = {}
+    for category, services in (category_map or {}).items():
+        if category.startswith("_"):
+            continue
+        for svc in services:
+            out[svc] = category
+    return out
+
+
+def discover_category_states(outdir):
+    """Find category-<name>.har captures written by capture_har.js."""
+    if not os.path.isdir(outdir):
+        return []
+    found = []
+    for fname in sorted(os.listdir(outdir)):
+        if fname.startswith("category-") and fname.endswith(".har"):
+            found.append((fname[len("category-"):-len(".har")], fname))
+    return found
 
 
 def load_json(path, default):
@@ -184,9 +211,10 @@ def analyze_file(path, trackers, site_domain):
     }
 
 
-def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=None):
+def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=None, category_map=None):
     allowlist = set(allowlist or ())
     cookie_sigs = cookie_sigs or {}
+    service_category = invert_categories(category_map)
 
     if not site_url:
         summary_file = load_json(os.path.join(outdir, "capture-summary.json"), {})
@@ -198,6 +226,15 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         states[state] = analyze_file(os.path.join(outdir, fname), trackers, site_domain)
         states[state]["storage"] = analyze_storage(
             os.path.join(outdir, f"{state}.storage.json"), trackers, site_domain, cookie_sigs)
+
+    category_states = discover_category_states(outdir)
+    for cat, fname in category_states:
+        key = f"category:{cat}"
+        stem = fname[: -len(".har")]
+        states[key] = analyze_file(os.path.join(outdir, fname), trackers, site_domain)
+        states[key]["storage"] = analyze_storage(
+            os.path.join(outdir, f"{stem}.storage.json"), trackers, site_domain, cookie_sigs)
+        states[key]["category_config"] = load_json(os.path.join(outdir, f"{stem}.config.json"), None)
 
     all_trackers = set()
     for s in states.values():
@@ -266,6 +303,57 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             all_third_party[d][key] = n
             all_third_party[d]["tracker"] = all_third_party[d]["tracker"] or classify(d, trackers)
 
+    # --- Per-category consent testing -------------------------------------
+    # Each scenario granted exactly one category and denied the rest, so any
+    # tracker belonging to a denied category that still fired is a violation.
+    #
+    # A scenario whose toggles could not be driven proves NOTHING: an empty
+    # violation list there means "we could not test", never "it passed". Those
+    # are marked inconclusive and excluded from the pass/fail tally.
+    category_tests = []
+    for cat, _ in category_states:
+        st = states[f"category:{cat}"]
+        cfg = st.get("category_config") or {}
+        configured = bool(cfg.get("opened") and cfg.get("saved")
+                          and cfg.get("target_applied") and not cfg.get("failures"))
+
+        violations, expected, informational, uncategorized = [], [], [], []
+        for tracker, count in sorted(st.get("trackers", {}).items()):
+            tcat = service_category.get(tracker)
+            entry = {"tracker": tracker, "category": tcat or "uncategorized", "requests": count}
+            if tracker in allowlist or tcat == "necessary":
+                continue
+            if tcat is None:
+                uncategorized.append(entry)
+            elif tcat in INFORMATIONAL_CATEGORIES:
+                informational.append(entry)
+            elif tcat == cat:
+                expected.append(entry)
+            else:
+                violations.append({**entry, "granted_category": cat, "severity": "high"})
+
+        category_tests.append({
+            "scenario": cat,
+            "granted": cat,
+            "configured": configured,
+            "inconclusive_reason": None if configured else (
+                cfg.get("error")
+                or ("; ".join(cfg.get("failures", [])) or None)
+                or ("no configuration record was written for this scenario"
+                    if not cfg else "preferences panel could not be reliably configured")),
+            "requests": st.get("requests", 0),
+            "trackers_detected": sorted(st.get("trackers", {})),
+            "violations": violations,
+            "expected_present": expected,
+            "informational": informational,
+            "uncategorized": uncategorized,
+            "toggles": cfg.get("toggles", []),
+            "cookies": st.get("storage", {}).get("cookies", []),
+        })
+
+    conclusive = [c for c in category_tests if c["configured"]]
+    category_violations = [v for c in conclusive for v in c["violations"]]
+
     summary = {
         "site_url": site_url,
         "site_domain": site_domain,
@@ -284,6 +372,11 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         "third_party_domains_all_states": dict(sorted(all_third_party.items())),
         "unknown_domain_counts": {k: states[k].get("unknown_domain_count", 0) for k, _ in STATES},
         "storage_captured": states["pre"]["storage"].get("available", False),
+        "category_testing_performed": bool(category_tests),
+        "category_tests": category_tests,
+        "category_violations": category_violations,
+        "category_scenarios_inconclusive": [c["scenario"] for c in category_tests if not c["configured"]],
+        "tracker_categories": service_category,
     }
 
     return {"states": states, "summary": summary}
@@ -295,6 +388,8 @@ def main():
     ap.add_argument("--trackers", default=DEFAULT_TRACKERS_PATH)
     ap.add_argument("--cookie-signatures", default=DEFAULT_COOKIE_SIGS_PATH,
                     help="JSON map of service name -> cookie name patterns (trailing * = prefix match)")
+    ap.add_argument("--categories", default=DEFAULT_CATEGORIES_PATH,
+                    help="JSON map of consent category -> service names, for per-category testing")
     ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST_PATH,
                     help="JSON array of tracker names LABELLED as necessary/expected pre-consent. "
                          "Affects labelling only — allowlisted services are still fully reported.")
@@ -306,7 +401,8 @@ def main():
     trackers = load_json(args.trackers, {})
     allowlist = set(load_json(args.allowlist, []))
     cookie_sigs = load_json(args.cookie_signatures, {})
-    findings = build_findings(args.outdir, trackers, allowlist, args.site_url, cookie_sigs)
+    category_map = load_json(args.categories, {})
+    findings = build_findings(args.outdir, trackers, allowlist, args.site_url, cookie_sigs, category_map)
     s = findings["summary"]
 
     out_path = args.out or os.path.join(args.outdir, "findings.json")
@@ -341,6 +437,27 @@ def main():
 
     print(f"Unclassified domains: pre={s['unknown_domain_counts']['pre']} "
           f"accept={s['unknown_domain_counts']['postaccept']} reject={s['unknown_domain_counts']['postreject']}")
+
+    if s["category_testing_performed"]:
+        print("\nPer-category consent testing:")
+        for c in s["category_tests"]:
+            if not c["configured"]:
+                print(f"  - granted '{c['granted']}' only: INCONCLUSIVE "
+                      f"({c['inconclusive_reason']}) - not counted as a pass")
+                continue
+            if c["violations"]:
+                print(f"  - granted '{c['granted']}' only: {len(c['violations'])} VIOLATION(S)")
+                for v in c["violations"]:
+                    print(f"      {v['tracker']} ({v['category']}) fired with {v['requests']} request(s) "
+                          f"while '{v['category']}' was denied")
+            else:
+                print(f"  - granted '{c['granted']}' only: OK, no denied-category trackers fired")
+            if c["uncategorized"]:
+                print(f"      note: uncategorized service(s) present, manual review: "
+                      f"{', '.join(u['tracker'] for u in c['uncategorized'])}")
+    else:
+        print("\nPer-category consent testing: not performed "
+              "(no per-category controls detected, or --skip-categories was used).")
 
 
 if __name__ == "__main__":

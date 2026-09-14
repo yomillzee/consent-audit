@@ -1,0 +1,20 @@
+{
+  "state": "category-functional",
+  "cookies": [
+    {
+      "name": "_GRECAPTCHA",
+      "domain": "site.test",
+      "path": "/",
+      "session_cookie": false,
+      "expires_days": 180,
+      "http_only": false,
+      "secure": true,
+      "same_site": "Lax",
+      "value_preview": "redacted",
+      "value_length": 24
+    }
+  ],
+  "local_storage": [],
+  "session_storage": [],
+  "errors": []
+}

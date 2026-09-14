@@ -72,6 +72,9 @@ function main() {
   const cookieGapsReject = summary.cookie_gaps_after_reject || [];
   const storageCaptured = !!summary.storage_captured;
   const necessary = summary.necessary_services_active || [];
+  const catTests = summary.category_tests || [];
+  const catViolations = summary.category_violations || [];
+  const catInconclusive = catTests.filter((c) => !c.configured);
 
   const children = [
     new Paragraph({ spacing: { before: 1400 }, alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Cookie Consent Compliance Review", bold: true, size: 44, color: NAVY })] }),
@@ -85,6 +88,14 @@ function main() {
     hasGaps
       ? p(`${gaps.length} third-party tracker(s) were found firing outside of proper consent gating.`, { bold: true, color: RED })
       : p("No tracker consent gaps were found: every detected third-party tracker only activated after the visitor accepted, and none fired before consent or after rejection.", { bold: true, color: GREEN }),
+    catViolations.length
+      ? p(`${catViolations.length} tracker(s) fired despite their consent category being explicitly denied.`, { bold: true, color: RED })
+      : (catTests.some((c) => c.configured)
+          ? p("Per-category consent choices were honored: no tracker fired while its category was denied.", { color: GREEN })
+          : null),
+    catInconclusive.length
+      ? p(`${catInconclusive.length} per-category scenario(s) could not be reliably configured and are reported as inconclusive rather than as passes.`, { italics: true, color: AMBER })
+      : null,
     cookieGapsPre.length
       ? p(`${cookieGapsPre.length} tracking or third-party cookie(s) were set before any consent decision.`, { bold: true, color: RED })
       : (storageCaptured
@@ -148,6 +159,62 @@ function main() {
   children.push(necRows.length
     ? makeTable(["Service", "Pre", "Reject", "Accept", "Action"], necRows, [2600, 700, 800, 800, 4260])
     : p("No allowlisted necessary services were observed."));
+
+  // ---- Per-category consent testing ----
+  children.push(h1("Per-Category Consent Testing"));
+  if (!catTests.length) {
+    children.push(p("Not performed. No per-category controls were detected on this site's consent banner, or per-category testing was disabled for this run. Only all-accept and all-reject were exercised.", { italics: true, color: AMBER }));
+  } else {
+    children.push(p("Each scenario below granted exactly one consent category and denied every other non-necessary category, then re-captured traffic. A tracker belonging to a denied category that still fired is a violation of the visitor's stated choice \u2014 the failure mode that all-accept and all-reject testing cannot detect."));
+
+    children.push(makeTable(
+      ["Scenario (granted only)", "Result", "Trackers fired", "Violations"],
+      catTests.map((c) => [
+        c.granted,
+        c.configured ? (c.violations.length ? "FAIL" : "Pass") : "Inconclusive",
+        String((c.trackers_detected || []).length),
+        c.configured ? String(c.violations.length) : "n/a",
+      ]),
+      [2600, 2000, 2200, 2360],
+      catTests.map((c) => (!c.configured ? AMBER : c.violations.length ? RED : GREEN))
+    ));
+
+    if (catViolations.length) {
+      children.push(h2("Category Violations"));
+      children.push(p("These trackers fired while the visitor had explicitly declined their category.", { color: RED }));
+      children.push(makeTable(
+        ["Tracker", "Its category", "Fired when only this was granted", "Requests"],
+        catViolations.map((v) => [v.tracker, v.category, v.granted_category, String(v.requests)]),
+        [2800, 2000, 2800, 1560],
+        catViolations.map(() => RED)
+      ));
+    }
+
+    if (catInconclusive.length) {
+      children.push(h2("Inconclusive Scenarios"));
+      children.push(p("The consent preferences panel could not be driven reliably for these scenarios, so they prove nothing either way and are excluded from the results above. They are NOT passes. Re-run with explicit --settings-selector / --save-selector values, or test these categories by hand.", { color: AMBER }));
+      children.push(makeTable(
+        ["Scenario", "Why it could not be tested"],
+        catInconclusive.map((c) => [c.granted, c.inconclusive_reason || "unknown"]),
+        [2400, 6760]
+      ));
+    }
+
+    const uncategorized = [...new Set(catTests.flatMap((c) => (c.uncategorized || []).map((u) => u.tracker)))];
+    if (uncategorized.length) {
+      children.push(h2("Services With No Category Assigned"));
+      children.push(p(`These fired during per-category testing but are not mapped to a consent category, so no automated verdict was reached for them. Review manually against the site's declared categories: ${uncategorized.join(", ")}.`, { color: AMBER }));
+    }
+
+    for (const c of catTests.filter((x) => x.configured && (x.toggles || []).length)) {
+      children.push(h2(`Consent State Applied \u2014 granted "${c.granted}" only`));
+      children.push(makeTable(
+        ["Category control", "Detected as", "Set to"],
+        c.toggles.map((t) => [t.label || "(unlabelled)", t.category, t.wanted ? "Allowed" : "Denied"]),
+        [4600, 2280, 2280]
+      ));
+    }
+  }
 
   // ---- Cookies ----
   children.push(h1("Cookies and Web Storage"));
@@ -221,6 +288,13 @@ function main() {
     recs.push(bullet("Move any tracker listed with 'Fired Pre-Consent: Yes' behind the consent management platform's gating logic immediately — this is the highest-severity finding."));
     recs.push(bullet("For trackers still active after rejection, confirm the CMP's 'Reject All' action is correctly wired to block that specific tag."));
   }
+  if (catViolations.length) {
+    const byCat = [...new Set(catViolations.map((v) => v.category))];
+    recs.push(bullet(`Fix the per-category gating for: ${byCat.join(", ")}. A tracker firing when its own category was declined means the CMP's category mapping is wrong or the tag is not registered with the CMP at all \u2014 a visitor-facing promise the site is not keeping.`));
+  }
+  if (catInconclusive.length) {
+    recs.push(bullet(`Re-test the inconclusive scenario(s) (${catInconclusive.map((c) => c.granted).join(", ")}) with explicit preference-panel selectors, or manually. They are untested, not passing.`));
+  }
   if (cookieGapsPre.length) {
     recs.push(bullet("Remove or defer the cookies listed under 'Cookies Set Before Consent'. Note that blocking a tracker's network requests does not by itself stop a cookie already written by inline JavaScript."));
   }
@@ -245,8 +319,9 @@ function main() {
     bullet("Each state visited the same set of pages, so request counts and tracker sets are directly comparable between states."),
     bullet("Read cookies, localStorage and sessionStorage directly from each browser context, capturing client-side storage that HTTP-level traffic alone does not reveal."),
     bullet("Classified requests and cookie domains against a signature list of common analytics, advertising, and marketing services."),
-    bullet("Cross-referenced each tracker, cookie and third-party domain across the three states to identify consent-gating gaps."),
-    p("Limitations: first/third-party classification uses a best-effort registrable-domain heuristic. Trackers absent from the signature list appear as unclassified domains rather than named services, and require manual review. A capture reflects one point in time; tag manager changes can alter behavior at any point after it.", { italics: true, color: "555555", size: 18 }),
+    bullet("Cross-referenced each tracker, cookie and third-party domain across states to identify consent-gating gaps."),
+    ...(catTests.length ? [bullet("Additionally exercised each consent category individually: opened the preferences panel, granted exactly one category, denied the rest, saved, and re-captured. Scenarios where the panel could not be driven reliably are reported as inconclusive rather than as passes.")] : []),
+    p("Limitations: category assignment for each service is a judgment call and should be checked against the site's own declared cookie categories. First/third-party classification uses a best-effort registrable-domain heuristic. Trackers absent from the signature list appear as unclassified domains rather than named services, and require manual review. A capture reflects one point in time; tag manager changes can alter behavior at any point after it.", { italics: true, color: "555555", size: 18 }),
   );
 
   const doc = new Document({
@@ -254,7 +329,8 @@ function main() {
     sections: [
       {
         properties: { page: { size: { width: 12240, height: 15840 }, margin: { top: 1080, bottom: 1080, left: 1080, right: 1080 } } },
-        children,
+        // Conditional summary lines above evaluate to null when they don't apply.
+        children: children.filter(Boolean),
       },
     ],
   });

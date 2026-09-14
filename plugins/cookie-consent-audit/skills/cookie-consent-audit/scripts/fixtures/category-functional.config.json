@@ -1,0 +1,22 @@
+{
+  "granted": "functional",
+  "opened": true,
+  "saved": false,
+  "target_applied": false,
+  "toggles": [
+    {
+      "label": "Analytics Cookies",
+      "category": "analytics",
+      "wanted": false,
+      "status": "native"
+    }
+  ],
+  "categories_seen": [
+    "necessary",
+    "analytics",
+    "advertising",
+    "functional"
+  ],
+  "failures": [],
+  "error": "save/confirm button not found in the preferences panel"
+}

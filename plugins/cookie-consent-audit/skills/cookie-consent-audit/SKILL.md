@@ -10,8 +10,9 @@ metadata:
 # Cookie Consent Audit
 
 Automates the full workflow: ask for a website → capture live network traffic,
-cookies and web storage before and after a consent decision → classify
-everything observed → produce a client-ready Word report.
+cookies and web storage before and after a consent decision, **and once per
+individual consent category** → classify everything observed → produce a
+client-ready Word report.
 
 This is a **full-disclosure audit**. Every tracker, cookie and third-party
 domain observed is carried through to the report. The allowlist only changes how
@@ -65,7 +66,8 @@ Run from the user's working directory so output lands somewhere they can find:
 node "$SCRIPTS/capture_har.js" <url> --outdir ./audit-out --paths "/,/about,/pricing"
 ```
 
-This produces `pre.har`, `postaccept.har`, `postreject.har`, matching
+This produces `pre.har`, `postaccept.har`, `postreject.har`, one
+`category-<name>.har` per consent category the banner exposes, matching
 `<state>.storage.json` files, and `capture-summary.json` in `./audit-out`. Each
 capture uses a fresh, isolated browser context so results from one state can't
 leak into another, and every state visits the same pages so the three are
@@ -90,6 +92,29 @@ node "$SCRIPTS/capture_har.js" <url> --outdir ./audit-out \
   --reject-selector "#my-reject-button"
 ```
 
+#### Per-category consent testing
+
+By default the capture also opens the banner's preferences panel and runs one
+scenario per category it finds: grant exactly that category, deny every other
+non-necessary one, save, then re-capture. This catches the common failure where
+accepting analytics silently enables advertising too — which all-accept and
+all-reject testing cannot detect.
+
+Each scenario writes a `category-<name>.config.json` recording exactly which
+toggles were found and set. **A scenario whose panel could not be driven is
+reported as inconclusive, never as a pass** — an empty violation list there
+means "not tested", and you must say so rather than reporting it as clean.
+
+If auto-detection misses the panel, pass the selectors explicitly:
+
+```bash
+node "$SCRIPTS/capture_har.js" <url> --outdir ./audit-out \
+  --settings-selector "#open-preferences" --save-selector "#save-preferences"
+```
+
+Use `--categories "analytics,advertising"` to force a specific set, or
+`--skip-categories` to skip this phase (it adds one capture per category).
+
 **If Playwright's bundled Chromium is unavailable** (some CI images ship their
 own browser), point at it explicitly:
 
@@ -106,7 +131,8 @@ python3 "$SCRIPTS/analyze_har.py" ./audit-out
 
 This classifies requests against `trackers.json` (URL signatures) and cookies
 against `cookie_signatures.json` (cookie-name signatures, since first-party
-tracking cookies can only be identified by name), then writes
+tracking cookies can only be identified by name), maps each service to a consent
+category via `tracker_categories.json`, then writes
 `./audit-out/findings.json`, which includes:
 
 - `tracker_matrix`: **every** tracker observed, with its full pre/accept/reject
@@ -118,6 +144,11 @@ tracking cookies can only be identified by name), then writes
 - `necessary_services_active`: services in `necessary_allowlist.json`
   (anti-spam, CAPTCHA, payments, the CMP's own cookie) — labelled, still fully
   reported, but excluded from the headline gap count
+- `category_tests`: one entry per category scenario, each with its violations
+  (trackers that fired while their category was denied), the toggles that were
+  actually applied, and a `configured` flag
+- `category_violations`: violations from **conclusive** scenarios only
+- `category_scenarios_inconclusive`: scenarios that could not be tested
 - `third_party_domains_all_states`: every non-first-party domain contacted,
   with unclassified ones flagged for manual review
 - Complete per-state cookie, localStorage and sessionStorage inventories
@@ -155,13 +186,23 @@ Summarize the top-line finding conversationally (e.g. "No gaps found — X, Y, Z
 trackers all correctly wait for consent" or "Found N trackers firing before
 consent — see the report"), then deliver the .docx.
 
+Report per-category results honestly. If a scenario is inconclusive, say it was
+not tested and why — never fold it into a clean result. If no per-category
+controls were found at all, say that only all-accept and all-reject were
+exercised.
+
 ## Notes and limitations
 
 - Auto-detection covers common CMPs; unusual custom banners may need manual
   selectors (see step 2).
-- `trackers.json`, `cookie_signatures.json` and `necessary_allowlist.json` are
-  living lists — extend them as new services come up, rather than hardcoding
-  new logic into the scripts.
+- `trackers.json`, `cookie_signatures.json`, `tracker_categories.json` and
+  `necessary_allowlist.json` are living lists — extend them as new services come
+  up, rather than hardcoding new logic into the scripts. A service added to a
+  signature list must also be given a category, or `smoke_test.sh` will fail.
+- Which category a service belongs to is a judgment call that should be checked
+  against the client's own declared cookie categories, not assumed.
+- Per-category testing drives the CMP's own UI. Unusual panels may need explicit
+  `--settings-selector` / `--save-selector` values.
 - First/third-party classification uses a best-effort registrable-domain
   heuristic rather than the full public suffix list.
 - A capture is a point-in-time snapshot. Tag manager changes can alter behavior

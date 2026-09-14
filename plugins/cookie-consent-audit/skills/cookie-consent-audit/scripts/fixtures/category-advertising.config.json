@@ -1,0 +1,34 @@
+{
+  "granted": "advertising",
+  "opened": true,
+  "saved": true,
+  "target_applied": true,
+  "toggles": [
+    {
+      "label": "Analytics Cookies",
+      "category": "analytics",
+      "wanted": false,
+      "status": "native"
+    },
+    {
+      "label": "Marketing Cookies",
+      "category": "advertising",
+      "wanted": true,
+      "status": "native"
+    },
+    {
+      "label": "Functional Cookies",
+      "category": "functional",
+      "wanted": false,
+      "status": "native"
+    }
+  ],
+  "categories_seen": [
+    "necessary",
+    "analytics",
+    "advertising",
+    "functional"
+  ],
+  "failures": [],
+  "error": null
+}

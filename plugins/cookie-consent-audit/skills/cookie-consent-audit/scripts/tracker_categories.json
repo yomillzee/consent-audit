@@ -1,0 +1,42 @@
+{
+  "_comment": "Maps each service in trackers.json / cookie_signatures.json to the consent category it belongs to. Used by per-category testing: if a service fires while its category is denied, that is a violation. Category assignment is a judgment call and varies by how a site declares its own cookie policy - review it against the client's declared categories. 'tag_manager' is treated as informational rather than a violation, since a container tag loading is not itself tracking; what it then loads is what matters.",
+  "necessary": [
+    "reCAPTCHA",
+    "Stripe",
+    "CleanTalk",
+    "Cloudflare Insights",
+    "Consent Manager (CMP)"
+  ],
+  "functional": [
+    "Intercom",
+    "Drift",
+    "Google Maps",
+    "Qualtrics"
+  ],
+  "analytics": [
+    "Google Analytics (GA4/UA)",
+    "Hotjar",
+    "Microsoft Clarity",
+    "Adobe Analytics",
+    "Mixpanel",
+    "Segment",
+    "Matomo"
+  ],
+  "advertising": [
+    "Google Ads / Remarketing",
+    "Meta / Facebook Pixel",
+    "TikTok Pixel",
+    "LinkedIn Insight Tag",
+    "Twitter / X Ads",
+    "Pinterest Tag",
+    "Snapchat Pixel",
+    "Amazon Ads",
+    "Criteo",
+    "Microsoft Advertising (UET)",
+    "HubSpot",
+    "Klaviyo"
+  ],
+  "tag_manager": [
+    "Google Tag Manager"
+  ]
+}
