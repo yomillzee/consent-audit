@@ -1,0 +1,119 @@
+{
+  "_comment": "Vendor and plain-language purpose for each service in trackers.json / cookie_signatures.json, used for the technology inventory table in the report. Purpose is what a client would call the tool, which is finer-grained than the consent category in tracker_categories.json (Hotjar is 'analytics' for consent purposes but reads as 'Behavior' to a reader). Extend this list when adding a service; smoke_test.sh fails if a signature has no entry here.",
+  "Adobe Analytics": {
+    "vendor": "Adobe",
+    "purpose": "Analytics"
+  },
+  "Amazon Ads": {
+    "vendor": "Amazon",
+    "purpose": "Advertising"
+  },
+  "CleanTalk": {
+    "vendor": "CleanTalk",
+    "purpose": "Spam filtering"
+  },
+  "Cloudflare Insights": {
+    "vendor": "Cloudflare",
+    "purpose": "Performance monitoring"
+  },
+  "Consent Manager (CMP)": {
+    "vendor": "Consent platform",
+    "purpose": "Consent management"
+  },
+  "Criteo": {
+    "vendor": "Criteo",
+    "purpose": "Advertising"
+  },
+  "Drift": {
+    "vendor": "Drift",
+    "purpose": "Live chat"
+  },
+  "Google Ads / Remarketing": {
+    "vendor": "Google",
+    "purpose": "Advertising"
+  },
+  "Google Analytics (GA4/UA)": {
+    "vendor": "Google",
+    "purpose": "Analytics"
+  },
+  "Google Maps": {
+    "vendor": "Google",
+    "purpose": "Maps"
+  },
+  "Google Tag Manager": {
+    "vendor": "Google",
+    "purpose": "Tag container"
+  },
+  "Hotjar": {
+    "vendor": "Hotjar",
+    "purpose": "Behavior"
+  },
+  "HubSpot": {
+    "vendor": "HubSpot",
+    "purpose": "Marketing automation"
+  },
+  "Intercom": {
+    "vendor": "Intercom",
+    "purpose": "Live chat"
+  },
+  "Klaviyo": {
+    "vendor": "Klaviyo",
+    "purpose": "Marketing automation"
+  },
+  "LinkedIn Insight Tag": {
+    "vendor": "LinkedIn",
+    "purpose": "Advertising"
+  },
+  "Matomo": {
+    "vendor": "Matomo",
+    "purpose": "Analytics"
+  },
+  "Meta / Facebook Pixel": {
+    "vendor": "Meta",
+    "purpose": "Advertising"
+  },
+  "Microsoft Advertising (UET)": {
+    "vendor": "Microsoft",
+    "purpose": "Advertising"
+  },
+  "Microsoft Clarity": {
+    "vendor": "Microsoft",
+    "purpose": "Behavior"
+  },
+  "Mixpanel": {
+    "vendor": "Mixpanel",
+    "purpose": "Product analytics"
+  },
+  "Pinterest Tag": {
+    "vendor": "Pinterest",
+    "purpose": "Advertising"
+  },
+  "Qualtrics": {
+    "vendor": "Qualtrics",
+    "purpose": "Surveys"
+  },
+  "Segment": {
+    "vendor": "Twilio",
+    "purpose": "Data pipeline"
+  },
+  "Snapchat Pixel": {
+    "vendor": "Snap",
+    "purpose": "Advertising"
+  },
+  "Stripe": {
+    "vendor": "Stripe",
+    "purpose": "Payments"
+  },
+  "TikTok Pixel": {
+    "vendor": "TikTok",
+    "purpose": "Advertising"
+  },
+  "Twitter / X Ads": {
+    "vendor": "X",
+    "purpose": "Advertising"
+  },
+  "reCAPTCHA": {
+    "vendor": "Google",
+    "purpose": "Bot protection"
+  }
+}

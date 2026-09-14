@@ -138,6 +138,14 @@ category via `tracker_categories.json`, then writes
 - `capture_usable` / `capture_errors` / `states_inconclusive`: whether the site
   actually loaded in each state. If any state failed, everything below it was
   never observed and must not be reported as a pass
+- `technology_matrix`: the client-facing inventory — one row per technology with
+  vendor, purpose, how many pages it was found on, what it did before consent /
+  after accept / after reject, a red/amber/green status and a recommended action
+- `health_score` / `health_deductions`: a 0-100 score from a transparent
+  deduction rubric, with every point traced to a named finding. Suppressed
+  (`null`) when the capture is unusable
+- `duplicate_tags` / `legacy_tags`: technologies deployed more than once with
+  different container IDs, and Universal Analytics tags still firing
 - `tracker_matrix`: **every** tracker observed, with its full pre/accept/reject
   firing pattern, request volume and classification
 - `consent_gaps`: trackers that fired **before consent** (high severity) or
@@ -204,10 +212,24 @@ exercised.
   (network access, URL, browser) and re-run before reporting anything.
 - Auto-detection covers common CMPs; unusual custom banners may need manual
   selectors (see step 2).
-- `trackers.json`, `cookie_signatures.json`, `tracker_categories.json` and
-  `necessary_allowlist.json` are living lists — extend them as new services come
-  up, rather than hardcoding new logic into the scripts. A service added to a
-  signature list must also be given a category, or `smoke_test.sh` will fail.
+- `trackers.json`, `cookie_signatures.json`, `tracker_categories.json`,
+  `vendors.json` and `necessary_allowlist.json` are living lists — extend them as
+  new services come up, rather than hardcoding new logic into the scripts. A
+  service added to a signature list must also be given a category **and** a
+  vendor/purpose entry, or `smoke_test.sh` will fail.
+- The health score is a deduction rubric for prioritizing work, **not** a legal
+  grade or a certification. It is reported alongside the deductions that produced
+  it so a client can argue with the number. Never present it as a compliance
+  verdict.
+- "Pages found" counts distinct pages a technology was seen on, attributed by
+  walking the HAR in order and treating each first-party document request as a
+  page boundary. Playwright reuses one page object across navigations, so its
+  `pageref` is identical for every entry and cannot be used for this. When a
+  capture records no document entries the column reads `—` rather than 0.
+- Google consent mode is read from the `gcs` parameter: a tag pinging with
+  storage denied (`G100`) is reported as a "cookieless ping" rather than being
+  flattened into "fired". Whether such a ping is lawful before consent is a legal
+  determination, so it is surfaced as amber for review — never auto-passed.
 - Which category a service belongs to is a judgment call that should be checked
   against the client's own declared cookie categories, not assumed.
 - Per-category testing drives the CMP's own UI. Unusual panels may need explicit
