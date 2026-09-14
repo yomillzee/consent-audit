@@ -135,6 +135,9 @@ tracking cookies can only be identified by name), maps each service to a consent
 category via `tracker_categories.json`, then writes
 `./audit-out/findings.json`, which includes:
 
+- `capture_usable` / `capture_errors` / `states_inconclusive`: whether the site
+  actually loaded in each state. If any state failed, everything below it was
+  never observed and must not be reported as a pass
 - `tracker_matrix`: **every** tracker observed, with its full pre/accept/reject
   firing pattern, request volume and classification
 - `consent_gaps`: trackers that fired **before consent** (high severity) or
@@ -193,6 +196,12 @@ exercised.
 
 ## Notes and limitations
 
+- A capture in which a state failed to load is **inconclusive, not clean**. The
+  page never rendered, so nothing could fire: an empty gap list there means "not
+  tested". `capture_har.js` exits non-zero and `analyze_har.py` sets
+  `capture_usable: false`, lists the failed states in `capture_errors`, and the
+  report is stamped inconclusive rather than reporting a pass. Fix the cause
+  (network access, URL, browser) and re-run before reporting anything.
 - Auto-detection covers common CMPs; unusual custom banners may need manual
   selectors (see step 2).
 - `trackers.json`, `cookie_signatures.json`, `tracker_categories.json` and

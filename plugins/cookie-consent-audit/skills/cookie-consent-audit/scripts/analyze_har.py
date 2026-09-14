@@ -28,6 +28,11 @@ DEFAULT_CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "tracker_categ
 
 STATES = [("pre", "pre.har"), ("postaccept", "postaccept.har"), ("postreject", "postreject.har")]
 
+# capture-summary.json keys each state by the action the capture performed,
+# while the analyzer keys them by HAR stem. Map between the two so a
+# navigation failure recorded at capture time is visible to the analysis.
+STATE_ACTION = {"pre": "pre", "postaccept": "accept", "postreject": "reject"}
+
 # A container tag loading is not itself tracking, so it is reported but not
 # counted as a per-category violation; what it loads is judged on its own.
 INFORMATIONAL_CATEGORIES = {"tag_manager"}
@@ -162,6 +167,28 @@ def analyze_storage(path, trackers, site_domain, cookie_sigs):
     }
 
 
+def capture_error_for(summary_file, action):
+    """The navigation error capture_har.js recorded for a state, if any."""
+    return ((summary_file.get("states") or {}).get(action) or {}).get("error")
+
+
+def state_is_usable(st):
+    """Whether a state observed enough to support any conclusion.
+
+    A capture-time navigation error, a missing HAR, or a HAR holding nothing
+    but the failed top-level request with no storage snapshot all mean the
+    page never loaded. That is "not tested" — it must never be read as
+    "nothing fired", which would turn a broken capture into a clean bill of
+    health. A failed navigation still leaves one entry in the HAR, so a lone
+    request with no storage counts as no observation at all.
+    """
+    if st.get("capture_error") or st.get("error"):
+        return False
+    if st.get("requests", 0) <= 1 and not (st.get("storage") or {}).get("available"):
+        return False
+    return True
+
+
 def analyze_file(path, trackers, site_domain):
     if not os.path.exists(path):
         return {
@@ -216,8 +243,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     cookie_sigs = cookie_sigs or {}
     service_category = invert_categories(category_map)
 
+    summary_file = load_json(os.path.join(outdir, "capture-summary.json"), {})
     if not site_url:
-        summary_file = load_json(os.path.join(outdir, "capture-summary.json"), {})
         site_url = summary_file.get("url")
     site_domain = registrable_domain(urlparse(site_url).netloc) if site_url else None
 
@@ -226,6 +253,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         states[state] = analyze_file(os.path.join(outdir, fname), trackers, site_domain)
         states[state]["storage"] = analyze_storage(
             os.path.join(outdir, f"{state}.storage.json"), trackers, site_domain, cookie_sigs)
+        states[state]["capture_error"] = capture_error_for(summary_file, STATE_ACTION[state])
+        states[state]["usable"] = state_is_usable(states[state])
 
     category_states = discover_category_states(outdir)
     for cat, fname in category_states:
@@ -235,6 +264,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         states[key]["storage"] = analyze_storage(
             os.path.join(outdir, f"{stem}.storage.json"), trackers, site_domain, cookie_sigs)
         states[key]["category_config"] = load_json(os.path.join(outdir, f"{stem}.config.json"), None)
+        states[key]["capture_error"] = capture_error_for(summary_file, f"category:{cat}")
+        states[key]["usable"] = state_is_usable(states[key])
 
     all_trackers = set()
     for s in states.values():
@@ -315,7 +346,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         st = states[f"category:{cat}"]
         cfg = st.get("category_config") or {}
         configured = bool(cfg.get("opened") and cfg.get("saved")
-                          and cfg.get("target_applied") and not cfg.get("failures"))
+                          and cfg.get("target_applied") and not cfg.get("failures")
+                          and st.get("usable"))
 
         violations, expected, informational, uncategorized = [], [], [], []
         for tracker, count in sorted(st.get("trackers", {}).items()):
@@ -337,7 +369,9 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             "granted": cat,
             "configured": configured,
             "inconclusive_reason": None if configured else (
-                cfg.get("error")
+                st.get("capture_error")
+                or (None if st.get("usable") else "the page did not load in this scenario")
+                or cfg.get("error")
                 or ("; ".join(cfg.get("failures", [])) or None)
                 or ("no configuration record was written for this scenario"
                     if not cfg else "preferences panel could not be reliably configured")),
@@ -354,9 +388,28 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     conclusive = [c for c in category_tests if c["configured"]]
     category_violations = [v for c in conclusive for v in c["violations"]]
 
+    # A state that never loaded observed nothing. Surfacing that here keeps an
+    # empty gap list from being presented downstream as a clean result.
+    states_inconclusive = [k for k, _ in STATES if not states[k]["usable"]]
+    capture_errors = [
+        {"state": k,
+         "action": STATE_ACTION[k],
+         "error": (states[k].get("capture_error") or states[k].get("error")
+                   or "no traffic captured and no storage snapshot")}
+        for k in states_inconclusive
+    ]
+    capture_usable = not states_inconclusive
+
     summary = {
         "site_url": site_url,
         "site_domain": site_domain,
+        "capture_usable": capture_usable,
+        "states_inconclusive": states_inconclusive,
+        "capture_errors": capture_errors,
+        # The gap lists below describe only what was actually observed. With an
+        # unusable capture they are evidence of nothing, so never report them
+        # as a pass while this is false.
+        "consent_gaps_authoritative": capture_usable,
         "pre_consent_request_count": states["pre"]["requests"],
         "post_accept_request_count": states["postaccept"]["requests"],
         "post_reject_request_count": states["postreject"]["requests"],
@@ -410,6 +463,22 @@ def main():
         json.dump(findings, f, indent=2)
 
     print(f"Findings written to {out_path}")
+
+    # Lead with this. Everything below describes what was observed, and if the
+    # site never loaded then nothing was observed - an empty gap list would
+    # otherwise read as a clean audit.
+    if not s["capture_usable"]:
+        print()
+        print("=" * 72)
+        print("CAPTURE INCONCLUSIVE - THIS RUN PROVES NOTHING")
+        for e in s["capture_errors"]:
+            print(f"  - state '{e['state']}' did not load: {e['error']}")
+        print()
+        print("An empty gap list below means 'not tested', NOT 'no trackers fired'.")
+        print("Fix the capture and re-run before reporting any of these results.")
+        print("=" * 72)
+        print()
+
     print(f"Trackers detected: {s['trackers_detected_total']}")
 
     if s["consent_gaps"]:
@@ -417,8 +486,10 @@ def main():
         for g in s["consent_gaps"]:
             print(f"  - {g['tracker']}: pre={g['fired_pre_consent']} "
                   f"post_reject={g['fired_after_reject']} severity={g['severity']}")
-    else:
+    elif s["capture_usable"]:
         print("No consent gaps found - all detected trackers were correctly gated behind Accept.")
+    else:
+        print("No consent gaps listed - because nothing was observed. This is NOT a pass.")
 
     if s["necessary_services_active"]:
         print(f"Necessary services active (reported, not counted as gaps): {s['necessary_services_active']}")

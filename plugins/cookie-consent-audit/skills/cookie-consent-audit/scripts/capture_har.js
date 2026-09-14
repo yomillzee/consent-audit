@@ -549,4 +549,16 @@ async function discoverCmp(url, overrideSelectors, executablePath) {
     console.warn('\nWARNING: Could not auto-detect Accept/Reject buttons for at least one state.');
     console.warn('Re-run with --accept-selector and --reject-selector pointing at the real buttons.');
   }
+
+  // A capture where the page never loaded is worthless, but it still writes a
+  // summary and three HARs that look superficially like a result. Exiting
+  // non-zero stops a pipeline from analyzing and reporting on nothing.
+  const failed = Object.entries(summary.states).filter(([, v]) => v.error);
+  if (failed.length) {
+    console.error(`\nERROR: ${failed.length} of ${Object.keys(summary.states).length} state(s) failed to load:`);
+    for (const [name, v] of failed) console.error(`  - ${name}: ${v.error.split('\n')[0]}`);
+    console.error('These states observed nothing. Do not read an empty result as "no trackers fired" —');
+    console.error('fix the cause (network access, URL, browser) and re-run before analyzing.');
+    process.exitCode = 1;
+  }
 })();
