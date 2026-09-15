@@ -416,6 +416,53 @@ print(f"{len(trackers | cookies)} services, all categorized and consistent")
 PY
 
 echo
+echo "== false-positive guards =="
+# These cover the two classifications most likely to send an agency after a
+# non-problem. Asserted directly against the classifier rather than through a
+# fixture capture, because what matters is the rule, not one sample.
+python3 - "$SCRIPTS" <<'GUARDS'
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import analyze_har as A
+
+fns = json.load(open(os.path.join(sys.argv[1], "cookie_functions.json")))
+fail = []
+
+# --- Google identifiers are not interchangeable -------------------------
+# googletagmanager.com serves the container, GA4 and Google Ads alike, so an
+# ordinary correct install presents three ids on one signature. Calling that a
+# duplicate deployment advises removing a tag that is doing its job.
+if A.duplicated_id_kinds(["GTM-MGKL2KSJ", "G-C4XR35FVF6", "AW-17997917321"]):
+    fail.append("normal GTM + GA4 + Ads install reported as a duplicate deployment")
+
+# ...while real duplication of one kind must still be caught.
+if not A.duplicated_id_kinds(["GTM-AAAA", "GTM-BBBB"]):
+    fail.append("two GTM containers not reported as duplicate")
+if not A.duplicated_id_kinds(["G-AAAA", "G-BBBB", "GTM-X"]):
+    fail.append("two GA4 measurement ids not reported as duplicate")
+
+# --- cookies are judged by function, not by whose domain they sit on ----
+# __cf_bm is Cloudflare bot management wherever it appears. On a vendor's
+# subdomain it reads as that vendor's tracking cookie if judged by domain.
+for name in ("__cf_bm", "_GRECAPTCHA", "AWSALB0001", "cf_clearance"):
+    if A.classify_cookie_function(name, fns) != "security":
+        fail.append(name + " not classified as a security cookie")
+for name in ("cookieyes-consent", "OptanonConsent", "cky-action"):
+    if A.classify_cookie_function(name, fns) != "consent":
+        fail.append(name + " not classified as a consent-record cookie")
+
+# ...and genuine tracking cookies must NOT be excused by this route.
+for name in ("_ga", "_fbp", "__hstc", "hubspotutk", "_hjSessionUser", "_clck"):
+    if A.classify_cookie_function(name, fns) is not None:
+        fail.append(name + " wrongly classified as a non-consent cookie")
+
+if fail:
+    for f in fail:
+        print("  FAIL:", f)
+    sys.exit(1)
+print("  Google identifier kinds distinguished; security/consent cookies separated from tracking")
+GUARDS
+
 echo "== report =="
 if [ ! -d "$SCRIPTS/node_modules" ]; then
   echo "node_modules missing — run: (cd \"$SCRIPTS\" && npm install)" >&2

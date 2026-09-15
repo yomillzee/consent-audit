@@ -1,0 +1,13 @@
+{
+  "_comment": "Cookie NAME patterns mapped to the function they serve, so a cookie is judged by what it does rather than by whose domain it happens to sit on. A trailing '*' matches by prefix. Cookies whose function is 'security' or 'consent' are not counted as consent gaps: they are still listed in full, with their function shown, so the classification can be reviewed rather than taken on trust. This does NOT settle the legal question of strict necessity, which depends on implementation and jurisdiction.",
+
+  "security": {
+    "_comment": "Bot management, DDoS protection, WAF, CAPTCHA and load-balancer affinity. __cf_bm is the common false positive: Cloudflare sets it on any domain behind Cloudflare, so it appears on a vendor's subdomains and reads as that vendor's tracking cookie when judged by domain alone.",
+    "patterns": ["__cf_bm", "__cflb", "__cfruid", "__cfwaitingroom", "cf_clearance", "_cfuvid", "_GRECAPTCHA", "AWSALB*", "AWSALBCORS*", "incap_ses_*", "visid_incap_*", "__Secure-BUCKET"]
+  },
+
+  "consent": {
+    "_comment": "The consent management platform's own record of the visitor's choice. A CMP cannot remember a refusal without storing it.",
+    "patterns": ["cookieyes-consent", "cky-*", "OptanonConsent", "OptanonAlertBoxClosed", "CookieConsent", "CookieConsentBulkSetting*", "cookie_notice_accepted", "borlabs-cookie", "termly-*", "osano_consentmanager*", "uc_settings", "usercentrics*", "euconsent-v2", "eupubconsent-v2"]
+  }
+}

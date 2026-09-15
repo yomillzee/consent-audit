@@ -26,6 +26,15 @@ DEFAULT_ALLOWLIST_PATH = os.path.join(os.path.dirname(__file__), "necessary_allo
 DEFAULT_COOKIE_SIGS_PATH = os.path.join(os.path.dirname(__file__), "cookie_signatures.json")
 DEFAULT_CATEGORIES_PATH = os.path.join(os.path.dirname(__file__), "tracker_categories.json")
 DEFAULT_VENDORS_PATH = os.path.join(os.path.dirname(__file__), "vendors.json")
+DEFAULT_COOKIE_FUNCTIONS_PATH = os.path.join(os.path.dirname(__file__), "cookie_functions.json")
+
+# Functions that do not require prior consent to exist, so a cookie serving one
+# is not a consent gap. Judged by what the cookie does, not by whose domain it
+# sits on: __cf_bm is Cloudflare's bot-management cookie wherever it appears,
+# and reading it as a marketing cookie because it turned up on a marketing
+# vendor's subdomain is a false positive that inflates the finding count and
+# points remediation at the wrong thing.
+NON_CONSENT_FUNCTIONS = ("security", "consent")
 
 STATES = [("pre", "pre.har"), ("postaccept", "postaccept.har"), ("postreject", "postreject.har")]
 
@@ -109,6 +118,19 @@ def classify(value, trackers):
     return None
 
 
+def classify_cookie_function(name, cookie_functions):
+    """The function a cookie serves, by name. A trailing '*' matches by prefix."""
+    low = (name or "").lower()
+    for function, spec in cookie_functions.items():
+        if function.startswith("_"):
+            continue
+        for pat in spec.get("patterns", []):
+            pl = pat.lower()
+            if (low.startswith(pl[:-1]) if pl.endswith("*") else low == pl):
+                return function
+    return None
+
+
 def classify_cookie_name(name, cookie_sigs):
     """Match a cookie by NAME.
 
@@ -130,7 +152,7 @@ def classify_cookie_name(name, cookie_sigs):
     return None
 
 
-def analyze_storage(path, trackers, site_domain, cookie_sigs):
+def analyze_storage(path, trackers, site_domain, cookie_sigs, cookie_functions):
     """Cookies and web storage — the part HAR captures structurally cannot see."""
     raw = load_json(path, None)
     if raw is None:
@@ -148,6 +170,9 @@ def analyze_storage(path, trackers, site_domain, cookie_sigs):
             # Name first: first-party tracking cookies are the common case and
             # only the name identifies them.
             "attributed_to": classify_cookie_name(c.get("name"), cookie_sigs) or classify(domain, trackers),
+            # What the cookie does, which decides whether its presence before
+            # consent is a gap. None means "not recognised", never "harmless".
+            "function": classify_cookie_function(c.get("name"), cookie_functions),
             "long_lived": expires_days is not None and expires_days > LONG_LIVED_DAYS,
         })
 
@@ -168,10 +193,40 @@ def analyze_storage(path, trackers, site_domain, cookie_sigs):
     }
 
 
-# Query parameters that carry a tag/container/measurement id. Two distinct ids
-# for one service means the tag is deployed twice - a real and common finding.
+# Query parameters that carry a tag/container/measurement id.
 ID_PARAMS = ("tid", "id", "pixel_id", "pid")
-ID_PREFIXES = ("GTM-", "G-", "UA-", "AW-", "DC-")
+
+# Google identifiers are NOT interchangeable, and conflating them invents
+# duplicates that are not there. googletagmanager.com serves the container
+# (gtm.js?id=GTM-...), GA4 (gtag/js?id=G-...) and Google Ads (gtag/js?id=AW-...)
+# alike, so an ordinary, correct install of all three is seen as three ids on
+# one "Google Tag Manager" signature. Counting distinct ids would call that a
+# duplicate deployment and advise removing a tag that is doing its job — the
+# most damaging thing this report could get wrong, since acting on it breaks a
+# working setup. A duplicate is two ids OF THE SAME KIND.
+ID_KINDS = (
+    ("GTM-", "Tag Manager container"),
+    ("G-", "GA4 measurement ID"),
+    ("UA-", "Universal Analytics property"),
+    ("AW-", "Google Ads conversion ID"),
+    ("DC-", "Floodlight advertiser ID"),
+)
+ID_PREFIXES = tuple(prefix for prefix, _ in ID_KINDS)
+
+
+def id_kind(identifier):
+    for prefix, kind in ID_KINDS:
+        if identifier.startswith(prefix):
+            return kind
+    return "identifier"
+
+
+def duplicated_id_kinds(ids):
+    """Ids grouped by kind, keeping only kinds that genuinely repeat."""
+    by_kind = defaultdict(list)
+    for identifier in ids:
+        by_kind[id_kind(identifier)].append(identifier)
+    return {kind: sorted(v) for kind, v in by_kind.items() if len(v) > 1}
 
 
 def extract_signals(url):
@@ -328,9 +383,10 @@ def analyze_file(path, trackers, site_domain):
 
 
 def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=None,
-                   category_map=None, vendors=None):
+                   category_map=None, vendors=None, cookie_functions=None):
     allowlist = set(allowlist or ())
     cookie_sigs = cookie_sigs or {}
+    cookie_functions = cookie_functions or {}
     vendors = {k: v for k, v in (vendors or {}).items() if not k.startswith("_")}
     service_category = invert_categories(category_map)
 
@@ -343,7 +399,7 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     for state, fname in STATES:
         states[state] = analyze_file(os.path.join(outdir, fname), trackers, site_domain)
         states[state]["storage"] = analyze_storage(
-            os.path.join(outdir, f"{state}.storage.json"), trackers, site_domain, cookie_sigs)
+            os.path.join(outdir, f"{state}.storage.json"), trackers, site_domain, cookie_sigs, cookie_functions)
         states[state]["capture_error"] = capture_error_for(summary_file, STATE_ACTION[state])
         states[state]["usable"] = state_is_usable(states[state])
 
@@ -353,7 +409,7 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         stem = fname[: -len(".har")]
         states[key] = analyze_file(os.path.join(outdir, fname), trackers, site_domain)
         states[key]["storage"] = analyze_storage(
-            os.path.join(outdir, f"{stem}.storage.json"), trackers, site_domain, cookie_sigs)
+            os.path.join(outdir, f"{stem}.storage.json"), trackers, site_domain, cookie_sigs, cookie_functions)
         states[key]["category_config"] = load_json(os.path.join(outdir, f"{stem}.config.json"), None)
         states[key]["capture_error"] = capture_error_for(summary_file, f"category:{cat}")
         states[key]["usable"] = state_is_usable(states[key])
@@ -411,6 +467,12 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     pre_cookies = states["pre"]["storage"].get("cookies", [])
     reject_cookies = states["postreject"]["storage"].get("cookies", [])
     def is_cookie_gap(c):
+        # Function first. A bot-management or consent-record cookie is not a
+        # marketing cookie because it appeared on a marketing vendor's
+        # subdomain, and counting it as one both inflates the tally and sends
+        # remediation after the wrong thing.
+        if c.get("function") in NON_CONSENT_FUNCTIONS:
+            return False  # still listed in full, with its function shown
         if c["attributed_to"] in allowlist:
             return False  # labelled necessary; still listed in the full cookie tables
         return c["third_party"] or bool(c["attributed_to"])
@@ -505,7 +567,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         allowlisted = t in allowlist
         ids = sorted({i for k, _ in STATES for i in states[k].get("tracker_ids", {}).get(t, [])})
         is_legacy = any("legacy" in signals_for(k, t) for k, _ in STATES)
-        is_duplicate = len(ids) > 1
+        duplicated = duplicated_id_kinds(ids)
+        is_duplicate = bool(duplicated)
 
         # Pages are counted from whichever state saw the most of them; a tracker
         # gated until Accept is naturally absent from the pre-consent state.
@@ -539,7 +602,14 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             action += "; remove duplicate tag"
 
         if is_duplicate:
-            duplicate_tags.append({"tracker": t, "ids": ids})
+            duplicate_tags.append({
+                "tracker": t,
+                "ids": ids,
+                # What is actually duplicated, so the finding can be checked
+                # rather than taken on trust.
+                "duplicated": duplicated,
+                "evidence": "; ".join(f"{kind}: {', '.join(v)}" for kind, v in sorted(duplicated.items())),
+            })
         if is_legacy:
             legacy_tags.append({"tracker": t, "ids": ids})
 
@@ -574,7 +644,7 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     for d in legacy_tags:
         deductions.append((5, f"{d['tracker']} is a legacy tag still collecting"))
     for d in duplicate_tags:
-        deductions.append((5, f"{d['tracker']} is deployed more than once ({', '.join(d['ids'])})"))
+        deductions.append((5, f"{d['tracker']} has a repeated identifier ({d['evidence']})"))
     if unclassified_pre:
         deductions.append((min(10, 2 * len(unclassified_pre)),
                            f"{len(unclassified_pre)} unclassified third-party domain(s) contacted before consent"))
@@ -654,6 +724,9 @@ def main():
                     help="JSON map of service name -> cookie name patterns (trailing * = prefix match)")
     ap.add_argument("--categories", default=DEFAULT_CATEGORIES_PATH,
                     help="JSON map of consent category -> service names, for per-category testing")
+    ap.add_argument("--cookie-functions", default=DEFAULT_COOKIE_FUNCTIONS_PATH,
+                    help="JSON mapping cookie-name patterns to the function they serve. "
+                         "Security and consent cookies are listed but not counted as gaps.")
     ap.add_argument("--vendors", default=DEFAULT_VENDORS_PATH,
                     help="JSON map of service name -> {vendor, purpose}, for the technology inventory")
     ap.add_argument("--allowlist", default=DEFAULT_ALLOWLIST_PATH,
@@ -669,8 +742,9 @@ def main():
     cookie_sigs = load_json(args.cookie_signatures, {})
     category_map = load_json(args.categories, {})
     vendors = load_json(args.vendors, {})
+    cookie_functions = load_json(args.cookie_functions, {})
     findings = build_findings(args.outdir, trackers, allowlist, args.site_url, cookie_sigs,
-                              category_map, vendors)
+                              category_map, vendors, cookie_functions)
     s = findings["summary"]
 
     out_path = args.out or os.path.join(args.outdir, "findings.json")
