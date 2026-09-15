@@ -128,6 +128,32 @@ Useful things to ask for:
   explicit selectors when auto-detection misses.
 - `Skip the per-category tests, just do accept and reject` — faster, since
   per-category testing adds one capture per category.
+- `Run it three times` — repeats the capture and reports which findings held
+  every time.
+- `Discover ten pages from the navigation` — widens coverage beyond the paths
+  you name.
+
+## How far to trust a result
+
+The evidence is asymmetric, and it is worth being clear about which half you
+are reading.
+
+A gap **found** is strong. The audit observed an actual request to the tracker
+before consent was given; that happened, and re-running cannot unfind it.
+
+A **clean** result is weak. It means nothing fired during that capture window,
+on those pages, from that IP address. Four things limit it:
+
+| Limit | What to do about it |
+| --- | --- |
+| One capture can miss a tag that fires slowly or only sometimes | `--runs 3` — findings are reported as consistent or intermittent, and an intermittent one is a fault, not noise |
+| A few paths is thin coverage for a large site | `--discover 10` reads the site's own navigation instead of guessing |
+| Banners are geo-targeted on IP, and most runners are US-based | `--proxy` through an egress proxy in the region you care about. `--locale` and `--timezone` do **not** move IP-based targeting |
+| Trackers absent from the signature list | They appear as unclassified domains and need a human to name them |
+
+Server-to-server tracking (Meta's Conversions API, GA4's Measurement Protocol)
+never touches the browser, so **no** browser-driven audit can see it, this one
+included. Confirming it requires access to the tag configuration.
 
 ## What gets reported
 
@@ -139,10 +165,13 @@ Useful things to ask for:
 | Consent gap analysis | Trackers that fired pre-consent (high) or after reject (medium) |
 | Per-category consent testing | One scenario per category: what fired when only that category was granted, which toggles were applied, and any violations |
 | Services classified as necessary | Allowlisted services shown with their actual firing pattern, for sign-off |
-| Cookies and web storage | Cookies set before consent, cookies surviving reject, and the complete cookie / localStorage / sessionStorage inventory per state |
+| Cookies and web storage | Cookies set before consent, and cookies surviving reject |
 | All third-party domains | Every non-first-party domain contacted, with unclassified ones flagged |
+| Run-to-run stability | With `--runs N`: which findings held in every run, and which were intermittent |
 | Recommendations | Tailored to the findings |
 | Methodology | How the capture was performed, and its limitations |
+| Glossary | Terms the report uses, including cookieless pings and server-side tagging |
+| Appendix | The complete cookie / localStorage / sessionStorage inventory per state. Folded shut in desktop Word, since it is reference material rather than findings |
 
 ### Why per-category testing matters
 
@@ -182,6 +211,7 @@ plugins/cookie-consent-audit/
     scripts/
       capture_har.js                    Playwright capture (pre / accept / reject)
       analyze_har.py                    HAR classification + gap analysis
+      merge_runs.py                     combines --runs N captures into one findings file
       generate_report.js                .docx report generation
       trackers.json                     URL signatures for network requests
       cookie_signatures.json            cookie-name signatures (first-party cookies)
