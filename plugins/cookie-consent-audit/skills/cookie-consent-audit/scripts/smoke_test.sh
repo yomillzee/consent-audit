@@ -496,6 +496,55 @@ if fail:
 print("  Google identifier kinds distinguished; security/consent cookies separated from tracking")
 GUARDS
 
+echo "== a capture that observed nothing =="
+# The most dangerous shape of all: the page returns 200, the banner is
+# "clicked", and nothing whatsoever is observed. A bot challenge or block page
+# looks exactly like this, and an empty finding list reads as a clean site.
+BLOCKED="$(mktemp -d)"
+python3 - "$BLOCKED" <<'BUILD'
+import json, os, sys
+d = sys.argv[1]
+har = {"log": {"entries": [
+    {"request": {"url": "https://site.test/"}, "response": {"status": 200}, "_resourceType": "document"}
+]}}
+storage = {"cookies": [], "local_storage": [], "session_storage": []}
+for stem in ("pre", "postaccept", "postreject"):
+    json.dump(har, open(os.path.join(d, stem + ".har"), "w"))
+    json.dump(storage, open(os.path.join(d, stem + ".storage.json"), "w"))
+json.dump({"url": "https://site.test/", "states": {
+    "pre": {"action": "pre", "cmpMatch": None},
+    "accept": {"action": "accept", "cmpMatch": {"matched": "CookieYes"}},
+    "reject": {"action": "reject", "cmpMatch": {"matched": "CookieYes"}},
+}}, open(os.path.join(d, "capture-summary.json"), "w"))
+BUILD
+
+STDOUT="$(python3 "$SCRIPTS/analyze_har.py" "$BLOCKED" 2>&1)"
+python3 - "$BLOCKED/findings.json" "$STDOUT" <<'CHECK'
+import json, sys
+s = json.load(open(sys.argv[1]))["summary"]
+stdout = sys.argv[2]
+errors = []
+
+if not s.get("observed_nothing"):
+    errors.append("a capture with no trackers, cookies or third parties must be flagged as having observed nothing")
+if s["overall_status"] != "Inconclusive":
+    errors.append(f"observing nothing must not produce a grade, got {s['overall_status']!r}")
+if s["overall_status"] == "Healthy":
+    errors.append("a blocked page must never read as a healthy site")
+if s["capture_usable"]:
+    errors.append("a capture that observed nothing is not usable")
+if "NOT A CLEAN RESULT" not in stdout:
+    errors.append("the console must say plainly that this is not a clean result")
+
+if errors:
+    print("BLOCKED-CAPTURE CHECK FAILED:")
+    for e in errors:
+        print("  -", e)
+    sys.exit(1)
+print("  a page that returns 200 but carries nothing is inconclusive, never Healthy")
+CHECK
+rm -rf "$BLOCKED"
+
 echo "== report =="
 if [ ! -d "$SCRIPTS/node_modules" ]; then
   echo "node_modules missing — run: (cd \"$SCRIPTS\" && npm install)" >&2

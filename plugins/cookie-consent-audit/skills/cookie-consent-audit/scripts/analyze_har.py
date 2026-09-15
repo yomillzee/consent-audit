@@ -652,7 +652,22 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
                    or "no traffic captured and no storage snapshot")}
         for k in states_inconclusive
     ]
-    capture_usable = not states_inconclusive
+    # A page can return 200 and still not be the site: a bot challenge or block
+    # page loads cleanly and carries no tags, no cookies and no third parties.
+    # Under the old score that surfaced as 100/100; under status bands it reads
+    # "Healthy", which is a confident clean bill of health for a site the audit
+    # never actually saw. Observing nothing at all is not evidence of nothing
+    # happening, so it is reported as inconclusive and the reader is told which
+    # of the two explanations to go and check.
+    observed_nothing = all(
+        not states[k].get("trackers")
+        and not states[k]["storage"].get("cookies")
+        and not states[k]["storage"].get("local_storage")
+        and not states[k].get("third_party_domains")
+        for k, _ in STATES
+    )
+
+    capture_usable = not states_inconclusive and not observed_nothing
     # Clicking the banner is what makes accept/reject mean anything.
     not_exercised = consent_not_exercised(summary_file)
     consent_exercised = not not_exercised
@@ -875,6 +890,7 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         # unusable: a verdict computed from nothing is exactly the false
         # reassurance this report exists to avoid.
         "overall_status": overall_status if results_authoritative else "Inconclusive",
+        "observed_nothing": observed_nothing,
         "findings": findings,
         "result_counts": {
             "confirmed": len(confirmed),
@@ -952,6 +968,20 @@ def main():
         print()
         print("An empty gap list below means 'not tested', NOT 'no trackers fired'.")
         print("Fix the capture and re-run before reporting any of these results.")
+        print("=" * 72)
+        print()
+
+    if s.get("observed_nothing"):
+        print()
+        print("=" * 72)
+        print("NOTHING OBSERVED IN ANY STATE - THIS IS NOT A CLEAN RESULT")
+        print("  No trackers, no cookies, no web storage, no third-party domains.")
+        print()
+        print("Either the site runs no tracking of any kind, or the capture never")
+        print("received the real page - a bot challenge or block page returns 200")
+        print("and looks like a clean site to an automated audit. The second is far")
+        print("more common, especially after repeated runs from one address.")
+        print("Open the site yourself before reporting anything from this run.")
         print("=" * 72)
         print()
 
