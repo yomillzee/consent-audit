@@ -1,0 +1,118 @@
+name: Cookie consent audit
+
+# Runs the audit on a GitHub-hosted runner, which has the open network access
+# the audit needs. Use this when installing Claude Code locally is not an
+# option: Actions tab -> Cookie consent audit -> Run workflow -> enter a URL.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Site to audit, e.g. https://example.com'
+        required: true
+        type: string
+      site_name:
+        description: 'Name for the report title (defaults to the domain)'
+        required: false
+        type: string
+      paths:
+        description: 'Pages to visit, comma-separated, e.g. /,/about,/contact'
+        required: false
+        type: string
+        default: '/'
+      skip_categories:
+        description: 'Skip per-category consent testing (faster, less thorough)'
+        required: false
+        type: boolean
+        default: false
+      accept_selector:
+        description: 'CSS selector for the Accept button (only if auto-detection fails)'
+        required: false
+        type: string
+      reject_selector:
+        description: 'CSS selector for the Reject button (only if auto-detection fails)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Done here rather than leaving it to run_audit.sh so that Chromium's
+      # system libraries (--with-deps) are installed too. The script's own
+      # install step then finds the browser already present and no-ops.
+      - name: Install dependencies and Chromium
+        working-directory: plugins/cookie-consent-audit/skills/cookie-consent-audit/scripts
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      # Inputs are passed through env, never interpolated into the script body,
+      # so a URL cannot inject shell.
+      - name: Run audit
+        id: run
+        env:
+          URL: ${{ inputs.url }}
+          SITE_NAME: ${{ inputs.site_name }}
+          PATHS: ${{ inputs.paths }}
+          SKIP_CATEGORIES: ${{ inputs.skip_categories }}
+          ACCEPT_SELECTOR: ${{ inputs.accept_selector }}
+          REJECT_SELECTOR: ${{ inputs.reject_selector }}
+        run: |
+          set -euo pipefail
+          mkdir -p out && cd out
+
+          args=("$URL")
+          if [ -n "$SITE_NAME" ]; then args+=("$SITE_NAME"); fi
+          if [ -n "$PATHS" ]; then args+=(--paths "$PATHS"); fi
+          if [ "$SKIP_CATEGORIES" = "true" ]; then args+=(--skip-categories); fi
+          if [ -n "$ACCEPT_SELECTOR" ]; then args+=(--accept-selector "$ACCEPT_SELECTOR"); fi
+          if [ -n "$REJECT_SELECTOR" ]; then args+=(--reject-selector "$REJECT_SELECTOR"); fi
+
+          bash "$GITHUB_WORKSPACE/plugins/cookie-consent-audit/skills/cookie-consent-audit/scripts/run_audit.sh" \
+            "${args[@]}" 2>&1 | tee audit.log
+
+      # run_audit.sh exits non-zero when a state failed to LOAD, but not when the
+      # consent banner was never found: that run still writes a report, correctly
+      # stamped inconclusive. Left alone it would show as a green run with a
+      # downloadable report that proves nothing, which is how an untrustworthy
+      # document reaches a client. Fail loudly instead; the artifact still
+      # uploads so the log can be read for the real selectors.
+      - name: Reject an inconclusive run
+        if: always() && steps.run.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if grep -qE 'CAPTURE INCONCLUSIVE|NO CONSENT BANNER WAS EXERCISED' out/audit.log; then
+            echo "::error::This run is INCONCLUSIVE and proves nothing about the site."
+            echo "The consent banner was never found or a state never loaded, so no"
+            echo "consent decision was tested. Do not send the attached report to anyone."
+            echo "Find the real Accept/Reject selectors in the page and re-run with the"
+            echo "accept_selector / reject_selector inputs."
+            exit 1
+          fi
+          echo "Capture exercised the banner in every state."
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cookie-audit-report
+          path: |
+            out/*.docx
+            out/audit.log
+            out/audit-*/findings.json
+          if-no-files-found: warn
+          retention-days: 30
