@@ -228,6 +228,9 @@ function main() {
   const scoreColor = healthScore == null ? MUTED : healthScore >= 85 ? GREEN : healthScore >= 60 ? AMBER : RED;
   const pagesVisited = summary.pages_visited || [];
 
+  // Reference tables collected while the body is built, emitted at the end.
+  const appendix = [];
+
   // Held in a variable so the contents list can be spliced in ahead of it once
   // every section has registered itself.
   const execSummaryHeading = h1("Executive Summary");
@@ -498,11 +501,17 @@ function main() {
       ));
     }
 
+    // The complete per-state inventory is reference material: needed to check a
+    // named cookie, not to understand a finding. It goes to the appendix so the
+    // two tables above — the ones that carry the evidence — are what a reader
+    // meets here. Nothing is dropped; the h2 headings below are built now and
+    // placed at the end, which keeps them out of the contents list (only
+    // top-level sections register there).
     for (const [key, label] of [["pre", "Pre-consent"], ["postreject", "Post-reject"], ["postaccept", "Post-accept"]]) {
       const st = states[key].storage || {};
       const cookies = st.cookies || [];
-      children.push(h2(`All Cookies — ${label} (${cookies.length})`));
-      children.push(cookies.length
+      appendix.push(h2(`All Cookies — ${label} (${cookies.length})`));
+      appendix.push(cookies.length
         ? makeTable(
             ["Cookie", "Domain", "Lifetime", "Third-party", "Attributed To"],
             cookies.map((c) => [c.name, c.registrable_domain, c.session_cookie ? "Session" : `${c.expires_days}d`, yn(c.third_party), c.attributed_to || "—"]),
@@ -511,14 +520,15 @@ function main() {
         : p("No cookies observed in this state."));
       const ls = st.local_storage || [];
       if (ls.length) {
-        children.push(p(`localStorage keys (${ls.length}): ${ls.map((i) => i.name).join(", ")}`, { size: 18 }));
+        appendix.push(p(`localStorage keys (${ls.length}): ${ls.map((i) => i.name).join(", ")}`, { size: 18 }));
       }
       const ss = st.session_storage || [];
       if (ss.length) {
-        children.push(p(`sessionStorage keys (${ss.length}): ${ss.map((i) => i.name).join(", ")}`, { size: 18 }));
+        appendix.push(p(`sessionStorage keys (${ss.length}): ${ss.map((i) => i.name).join(", ")}`, { size: 18 }));
       }
     }
-    children.push(p(`Cookies with a lifetime over 180 days are highlighted. Long retention periods are a common regulator finding even when consent gating itself is correct.`, { italics: true, size: 18, color: "555555" }));
+    appendix.push(p(`Cookies with a lifetime over 180 days are highlighted. Long retention periods are a common regulator finding even when consent gating itself is correct.`, { italics: true, size: 18, color: "555555" }));
+    children.push(p("The complete cookie and web-storage inventory for each consent state is in the appendix at the end of this report.", { italics: true, size: 18, color: MUTED }));
   }
 
   // ---- Every third-party domain ----
@@ -535,6 +545,45 @@ function main() {
         [3521, 770, 880, 880, 4029],
         tpKeys.map((d) => (!tpAll[d].tracker && tpAll[d].pre ? AMBER : undefined)))
     : p("No third-party domains were contacted."));
+
+  // ---- Run-to-run stability (only when the audit was run more than once) ----
+  const multiRun = summary.multi_run;
+  if (multiRun && multiRun.runs > 1) {
+    const n = multiRun.runs;
+    children.push(
+      h1("Run-to-Run Stability"),
+      p(`The capture was repeated ${n} times. The figures elsewhere in this report come from run ${multiRun.base_run}, the run with the most consent gaps; the rest of the runs are used here to show which findings held every time.`),
+      p("A gap seen in any run is real — the request was observed, and repeating the capture cannot unfind it. A finding that appears in some runs but not others is not noise to be averaged away: a tag that gates correctly only sometimes is broken, and is the harder version of the same fault. Conversely, a clean result is only as strong as the number of runs behind it.", { size: 18, color: "555555", italics: true }),
+    );
+
+    const gapRows = (multiRun.gap_stability || []);
+    children.push(gapRows.length
+      ? makeTable(
+          ["Tracker", "Gap seen in", "Verdict"],
+          gapRows.map((r) => [r.tracker, `${r.seen_in} of ${r.of} runs`, r.stable ? "Consistent" : "Intermittent — still a fault"]),
+          [4600, 2240, 3240],
+          gapRows.map((r) => (r.stable ? RED : AMBER)))
+      : p(`No consent gaps were found in any of the ${n} runs.`, { color: GREEN }));
+
+    if ((multiRun.gaps_only_in_other_runs || []).length) {
+      children.push(p(`Seen firing outside consent in another run, but not in run ${multiRun.base_run}, so absent from the tables above: ${multiRun.gaps_only_in_other_runs.join(", ")}. These fired before consent at least once and should be treated as gaps.`, { color: AMBER }));
+    }
+
+    const violRows = (multiRun.violation_stability || []).filter((r) => !r.stable);
+    if (violRows.length) {
+      children.push(
+        h2("Intermittent Category Violations"),
+        makeTable(
+          ["Violation", "Seen in"],
+          violRows.map((r) => [r.violation, `${r.seen_in} of ${r.of} runs`]),
+          [7080, 3000], violRows.map(() => AMBER)),
+      );
+    }
+
+    if (!(multiRun.unstable || []).length) {
+      children.push(p(`Every finding reproduced in all ${n} runs.`, { color: GREEN }));
+    }
+  }
 
   // ---- Recommendations ----
   if (healthScore != null) {
@@ -626,6 +675,10 @@ function main() {
     glossaryEntry("Health score", "The prioritisation rubric used in this report, with its arithmetic shown in full. It is a way of ranking what to fix first, not a legal grade or a certification."),
   );
 
+  if (appendix.length) {
+    children.push(h1(APPENDIX_TITLE), ...appendix);
+  }
+
   const coverEnd = children.indexOf(execSummaryHeading);
   if (coverEnd !== -1) children.splice(coverEnd, 0, ...contentsPage());
 
@@ -676,7 +729,8 @@ function main() {
 // LibreOffice, Google Docs and every PDF export ignore it and show the section
 // expanded, so it never hides anything from the record — the content is present
 // and complete either way.
-const COLLAPSED_SECTIONS = ["Cookies and Web Storage"];
+const APPENDIX_TITLE = "Appendix — Full Cookie and Storage Inventory";
+const COLLAPSED_SECTIONS = [APPENDIX_TITLE];
 
 // Word folds a heading when its paragraph carries <w:collapsed/>. The docx
 // library has no API for it, so the packed file is patched after the fact.

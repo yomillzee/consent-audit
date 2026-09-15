@@ -344,9 +344,71 @@ async function captureStorage(context, page) {
   return out;
 }
 
-async function captureState({ url, outPath, storagePath, configPath, action, overrideSelectors, waitMs, extraPaths, executablePath, detectedCmp }) {
-  const browser = await chromium.launch(executablePath ? { executablePath } : {});
-  const context = await browser.newContext({ recordHar: { path: outPath, mode: 'full' } });
+// Consent banners are routinely geo-targeted, and the targeting is done on the
+// visitor's IP address. Locale and timezone do not move it: a US runner with a
+// European locale is still a US visitor as far as the CMP is concerned. A real
+// European test needs an egress proxy in the region, which is what --proxy is
+// for; --locale and --timezone only cover the minority of banners that read
+// browser hints. Neither is a substitute for testing from the right country.
+function browserEnv(args) {
+  return {
+    executablePath: args['executable-path'] || process.env.CONSENT_AUDIT_CHROMIUM || null,
+    proxy: (args.proxy && args.proxy !== true) ? args.proxy : (process.env.CONSENT_AUDIT_PROXY || null),
+    locale: (args.locale && args.locale !== true) ? args.locale : null,
+    timezone: (args.timezone && args.timezone !== true) ? args.timezone : null,
+  };
+}
+
+function launchOpts(env) {
+  const opts = {};
+  if (env.executablePath) opts.executablePath = env.executablePath;
+  if (env.proxy) opts.proxy = { server: env.proxy };
+  return opts;
+}
+
+function contextOpts(env, extra = {}) {
+  const opts = { ...extra };
+  if (env.locale) opts.locale = env.locale;
+  if (env.timezone) opts.timezoneId = env.timezone;
+  return opts;
+}
+
+// Three hand-picked paths is thin coverage for a site of any size: a tag
+// present only on a landing or form page is invisible to it. Reading the site's
+// own navigation makes coverage follow the site instead of a guess.
+async function discoverPaths(url, limit, env) {
+  const browser = await chromium.launch(launchOpts(env));
+  const context = await browser.newContext(contextOpts(env));
+  const page = await context.newPage();
+  const found = [];
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const origin = new URL(url).origin;
+    const hrefs = await page.$$eval('a[href]', (as) => as.map((a) => a.href));
+    const seen = new Set();
+    for (const href of hrefs) {
+      let u;
+      try { u = new URL(href); } catch { continue; }
+      if (u.origin !== origin) continue;
+      const path_ = (u.pathname.replace(/\/+$/, '') || '/');
+      if (path_ === '/' || seen.has(path_)) continue;
+      if (/\.(pdf|jpe?g|png|gif|svg|webp|zip|docx?|xlsx?|mp4|avi)$/i.test(path_)) continue;
+      seen.add(path_);
+      found.push(path_);
+      if (found.length >= limit) break;
+    }
+  } catch (e) {
+    console.warn(`  Could not read the site navigation (${e.message.split('\n')[0]}); falling back to the given paths.`);
+  } finally {
+    await context.close();
+    await browser.close();
+  }
+  return found;
+}
+
+async function captureState({ url, outPath, storagePath, configPath, action, overrideSelectors, waitMs, extraPaths, env, detectedCmp }) {
+  const browser = await chromium.launch(launchOpts(env));
+  const context = await browser.newContext(contextOpts(env, { recordHar: { path: outPath, mode: 'full' } }));
   const page = await context.newPage();
 
   const result = { url, action, cmpMatch: null, error: null };
@@ -408,9 +470,9 @@ async function captureState({ url, outPath, storagePath, configPath, action, ove
 
 // A quick throwaway visit to learn which CMP is in use and which consent
 // categories its preferences panel exposes. No HAR is recorded here.
-async function discoverCmp(url, overrideSelectors, executablePath) {
-  const browser = await chromium.launch(executablePath ? { executablePath } : {});
-  const context = await browser.newContext();
+async function discoverCmp(url, overrideSelectors, env) {
+  const browser = await chromium.launch(launchOpts(env));
+  const context = await browser.newContext(contextOpts(env));
   const page = await context.newPage();
   const found = { cmp: null, categories: [], error: null };
   try {
@@ -455,22 +517,35 @@ async function discoverCmp(url, overrideSelectors, executablePath) {
   const args = parseArgs(process.argv.slice(2));
   const url = args._[0];
   if (!url) {
-    console.error('Usage: node capture_har.js <url> [--outdir ./out] [--wait 4000] [--accept-selector css] [--reject-selector css] [--paths "/a,/b"] [--executable-path /path/to/chrome] [--categories auto|a,b] [--skip-categories] [--settings-selector css] [--save-selector css]');
+    console.error('Usage: node capture_har.js <url> [--outdir ./out] [--wait 4000] [--accept-selector css] [--reject-selector css] [--paths "/a,/b"] [--executable-path /path/to/chrome] [--categories auto|a,b] [--skip-categories] [--settings-selector css] [--save-selector css] [--discover N] [--proxy http://host:port] [--locale en-GB] [--timezone Europe/London]');
     process.exit(1);
   }
 
   const outdir = args.outdir || './out';
   const waitMs = parseInt(args.wait || '4000', 10);
   const extraPaths = args.paths ? args.paths.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const discoverLimit = args.discover && args.discover !== true ? parseInt(args.discover, 10) : (args.discover ? 8 : 0);
   const overrideSelectors = {
     accept: args['accept-selector'] || null,
     reject: args['reject-selector'] || null,
     settings: args['settings-selector'] || null,
     save: args['save-selector'] || null,
   };
-  const executablePath = args['executable-path'] || process.env.CONSENT_AUDIT_CHROMIUM || null;
+  const env = browserEnv(args);
 
   fs.mkdirSync(outdir, { recursive: true });
+
+  let pathsToVisit = extraPaths;
+  if (discoverLimit > 0) {
+    console.log(`Discovering up to ${discoverLimit} pages from the site navigation...`);
+    const discovered = await discoverPaths(url, discoverLimit, env);
+    // Explicit --paths always win; discovery tops the list up rather than
+    // replacing a deliberate choice.
+    const merged = [...extraPaths];
+    for (const d of discovered) if (!merged.includes(d)) merged.push(d);
+    pathsToVisit = merged;
+    console.log(`  Pages to visit: ${pathsToVisit.length ? pathsToVisit.join(', ') : '(homepage only)'}`);
+  }
 
   const states = [
     { action: 'pre', file: 'pre.har' },
@@ -487,7 +562,7 @@ async function discoverCmp(url, overrideSelectors, executablePath) {
       console.log(`Category scenarios (explicit): ${discovery.categories.join(', ')}`);
     } else {
       console.log('Detecting consent categories...');
-      discovery = await discoverCmp(url, overrideSelectors, executablePath);
+      discovery = await discoverCmp(url, overrideSelectors, env);
       if (discovery.categories.length) {
         console.log(`  CMP: ${discovery.cmp || 'unknown'}; categories: ${discovery.categories.join(', ')}`);
       } else {
@@ -517,7 +592,7 @@ async function discoverCmp(url, overrideSelectors, executablePath) {
     console.log(`Capturing [${s.action}] -> ${outPath}`);
     const result = await captureState({
       url, outPath, storagePath, configPath, action: s.action, overrideSelectors,
-      waitMs, extraPaths, executablePath, detectedCmp: discovery.cmp,
+      waitMs, extraPaths: pathsToVisit, env, detectedCmp: discovery.cmp,
     });
     summary.states[s.action] = { ...result, harFile: outPath };
     if (result.error) {

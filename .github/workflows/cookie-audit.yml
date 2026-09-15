@@ -3,6 +3,11 @@ name: Cookie consent audit
 # Runs the audit on a GitHub-hosted runner, which has the open network access
 # the audit needs. Use this when installing Claude Code locally is not an
 # option: Actions tab -> Cookie consent audit -> Run workflow -> enter a URL.
+#
+# Geography: GitHub's runners are US-based, and consent banners are commonly
+# geo-targeted on the visitor's IP. For a European test, set an AUDIT_PROXY
+# repository secret to an egress proxy in the region; locale and timezone alone
+# do not move IP-based targeting.
 on:
   workflow_dispatch:
     inputs:
@@ -15,10 +20,28 @@ on:
         required: false
         type: string
       paths:
-        description: 'Pages to visit, comma-separated, e.g. /,/about,/contact'
+        description: 'Pages to always visit, comma-separated'
         required: false
         type: string
         default: '/'
+      discover:
+        description: 'Additionally discover this many pages from the site navigation (0 to disable)'
+        required: false
+        type: string
+        default: '8'
+      runs:
+        description: 'Repeat the whole capture this many times and report which findings held every time'
+        required: false
+        type: string
+        default: '1'
+      locale:
+        description: 'Browser locale, e.g. en-GB (does not change the IP the site sees)'
+        required: false
+        type: string
+      timezone:
+        description: 'Browser timezone, e.g. Europe/London (does not change the IP the site sees)'
+        required: false
+        type: string
       skip_categories:
         description: 'Skip per-category consent testing (faster, less thorough)'
         required: false
@@ -39,15 +62,15 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '22'
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -61,16 +84,22 @@ jobs:
           npx playwright install --with-deps chromium
 
       # Inputs are passed through env, never interpolated into the script body,
-      # so a URL cannot inject shell.
+      # so a URL cannot inject shell. The proxy comes from a secret rather than
+      # an input because workflow inputs are recorded in the run log.
       - name: Run audit
         id: run
         env:
           URL: ${{ inputs.url }}
           SITE_NAME: ${{ inputs.site_name }}
           PATHS: ${{ inputs.paths }}
+          DISCOVER: ${{ inputs.discover }}
+          RUNS: ${{ inputs.runs }}
+          LOCALE: ${{ inputs.locale }}
+          TIMEZONE: ${{ inputs.timezone }}
           SKIP_CATEGORIES: ${{ inputs.skip_categories }}
           ACCEPT_SELECTOR: ${{ inputs.accept_selector }}
           REJECT_SELECTOR: ${{ inputs.reject_selector }}
+          CONSENT_AUDIT_PROXY: ${{ secrets.AUDIT_PROXY }}
         run: |
           set -euo pipefail
           mkdir -p out && cd out
@@ -78,6 +107,10 @@ jobs:
           args=("$URL")
           if [ -n "$SITE_NAME" ]; then args+=("$SITE_NAME"); fi
           if [ -n "$PATHS" ]; then args+=(--paths "$PATHS"); fi
+          if [ -n "$DISCOVER" ] && [ "$DISCOVER" != "0" ]; then args+=(--discover "$DISCOVER"); fi
+          if [ -n "$RUNS" ] && [ "$RUNS" != "1" ]; then args+=(--runs "$RUNS"); fi
+          if [ -n "$LOCALE" ]; then args+=(--locale "$LOCALE"); fi
+          if [ -n "$TIMEZONE" ]; then args+=(--timezone "$TIMEZONE"); fi
           if [ "$SKIP_CATEGORIES" = "true" ]; then args+=(--skip-categories); fi
           if [ -n "$ACCEPT_SELECTOR" ]; then args+=(--accept-selector "$ACCEPT_SELECTOR"); fi
           if [ -n "$REJECT_SELECTOR" ]; then args+=(--reject-selector "$REJECT_SELECTOR"); fi
@@ -91,6 +124,10 @@ jobs:
       # downloadable report that proves nothing, which is how an untrustworthy
       # document reaches a client. Fail loudly instead; the artifact still
       # uploads so the log can be read for the real selectors.
+      #
+      # With --runs > 1 every run's analysis is on this log, so one inconclusive
+      # run out of several fails the job. That is deliberate: it is worth a look
+      # rather than a silent pass.
       - name: Reject an inconclusive run
         if: always() && steps.run.outcome == 'success'
         run: |
@@ -107,12 +144,13 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: cookie-audit-report
           path: |
             out/*.docx
             out/audit.log
             out/audit-*/findings.json
+            out/audit-*/run-*/findings.json
           if-no-files-found: warn
           retention-days: 30
