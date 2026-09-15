@@ -1,28 +1,119 @@
 {
-  "Google Analytics (GA4/UA)": ["google-analytics.com", "/g/collect", "analytics.google.com"],
-  "Google Ads / Remarketing": ["googleadservices.com", "googlesyndication.com", "doubleclick.net", "/rmkt/collect", "/ccm/collect", "google.com/pagead"],
-  "Google Tag Manager": ["googletagmanager.com"],
-  "Meta / Facebook Pixel": ["facebook.com/tr", "connect.facebook.net"],
-  "TikTok Pixel": ["analytics.tiktok.com", "business-api.tiktok.com"],
-  "LinkedIn Insight Tag": ["snap.licdn.com", "px.ads.linkedin.com", "linkedin.com/px"],
-  "HubSpot": ["hubapi.com", "hs-analytics.net", "hscollectedforms.net", "hsforms.com", "hubspot.com"],
-  "Hotjar": ["hotjar.com"],
-  "Microsoft Clarity": ["clarity.ms"],
-  "Twitter / X Ads": ["ads-twitter.com", "analytics.twitter.com", "t.co/i/adsct"],
-  "Pinterest Tag": ["ct.pinterest.com"],
-  "Snapchat Pixel": ["tr.snapchat.com"],
-  "Amazon Ads": ["amazon-adsystem.com"],
-  "Segment": ["api.segment.io", "cdn.segment.com"],
-  "Mixpanel": ["api.mixpanel.com"],
-  "Adobe Analytics": ["omtrdc.net", "2o7.net"],
-  "Criteo": ["criteo.com", "criteo.net"],
-  "Google Maps": ["maps.googleapis.com"],
-  "Intercom": ["widget.intercom.io", "api.intercom.io"],
-  "Drift": ["driftt.com"],
-  "Qualtrics": ["qualtrics.com"],
-  "CleanTalk": ["cleantalk.org"],
-  "Cloudflare Insights": ["cloudflareinsights.com"],
-  "reCAPTCHA": ["google.com/recaptcha", "recaptcha.net"],
-  "Stripe": ["js.stripe.com", "m.stripe.com"]
+  "Google Analytics (GA4/UA)": [
+    "google-analytics.com",
+    "/g/collect",
+    "analytics.google.com"
+  ],
+  "Google Ads / Remarketing": [
+    "googleadservices.com",
+    "googlesyndication.com",
+    "doubleclick.net",
+    "/rmkt/collect",
+    "/ccm/collect",
+    "google.com/pagead"
+  ],
+  "Google Tag Manager": [
+    "googletagmanager.com"
+  ],
+  "Meta / Facebook Pixel": [
+    "facebook.com/tr",
+    "connect.facebook.net"
+  ],
+  "TikTok Pixel": [
+    "analytics.tiktok.com",
+    "business-api.tiktok.com"
+  ],
+  "LinkedIn Insight Tag": [
+    "snap.licdn.com",
+    "px.ads.linkedin.com",
+    "linkedin.com/px"
+  ],
+  "HubSpot": [
+    "hs-analytics.net",
+    "hs-banner.com",
+    "hs-scripts.com",
+    "hsadspixel.net",
+    "hscollectedforms.net",
+    "hsforms.com",
+    "hsleadflows.net",
+    "hubapi.com",
+    "hubspot.com",
+    "usemessages.com"
+  ],
+  "Hotjar": [
+    "hotjar.com"
+  ],
+  "Microsoft Clarity": [
+    "clarity.ms"
+  ],
+  "Twitter / X Ads": [
+    "ads-twitter.com",
+    "analytics.twitter.com",
+    "t.co/i/adsct"
+  ],
+  "Pinterest Tag": [
+    "ct.pinterest.com"
+  ],
+  "Snapchat Pixel": [
+    "tr.snapchat.com"
+  ],
+  "Amazon Ads": [
+    "amazon-adsystem.com"
+  ],
+  "Segment": [
+    "api.segment.io",
+    "cdn.segment.com"
+  ],
+  "Mixpanel": [
+    "api.mixpanel.com"
+  ],
+  "Adobe Analytics": [
+    "omtrdc.net",
+    "2o7.net"
+  ],
+  "Criteo": [
+    "criteo.com",
+    "criteo.net"
+  ],
+  "Google Maps": [
+    "maps.googleapis.com"
+  ],
+  "Intercom": [
+    "widget.intercom.io",
+    "api.intercom.io"
+  ],
+  "Drift": [
+    "driftt.com"
+  ],
+  "Qualtrics": [
+    "qualtrics.com"
+  ],
+  "CleanTalk": [
+    "cleantalk.org"
+  ],
+  "Cloudflare Insights": [
+    "cloudflareinsights.com"
+  ],
+  "reCAPTCHA": [
+    "google.com/recaptcha",
+    "recaptcha.net"
+  ],
+  "Stripe": [
+    "js.stripe.com",
+    "m.stripe.com"
+  ],
+  "Consent Manager (CMP)": [
+    "cookieyes.com",
+    "cdn-cookieyes.com",
+    "log.cookieyes.com",
+    "cookielaw.org",
+    "onetrust.com",
+    "cookiebot.com",
+    "consentcdn.cookiebot.com",
+    "termly.io",
+    "osano.com",
+    "usercentrics.eu",
+    "cookie-script.com",
+    "iubenda.com"
+  ]
 }
-

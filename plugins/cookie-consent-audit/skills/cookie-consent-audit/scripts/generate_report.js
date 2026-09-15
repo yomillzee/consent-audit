@@ -33,8 +33,10 @@ const TOTAL_W = 10080; // exactly the text column: 12240 page - 2 x 1080 margin
 
 const NO_BORDER = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
 const HAIRLINE = { style: BorderStyle.SINGLE, size: 2, color: RULE };
-const STATUS_COLOR = { red: RED, amber: AMBER, green: GREEN };
-const STATUS_MARK = { red: "\u25CF", amber: "\u25CF", green: "\u25CF" };
+// The swatch is derived from the same verdict as everything else, so it cannot
+// disagree with the row it sits in.
+const STATUS_COLOR = { red: RED, amber: AMBER, green: GREEN, grey: MUTED };
+const STATUS_MARK = { red: "\u25CF", amber: "\u25CF", green: "\u25CF", grey: "\u25CB" };
 
 // keepNext/keepLines stop a heading being stranded at the foot of a page with
 // its table overleaf — the most visible flaw in a generated document. Each
@@ -98,6 +100,83 @@ function h2(text) {
 function p(text, opts = {}) {
   return new Paragraph({ spacing: { after: 160 }, children: [new TextRun({ text, ...opts })] });
 }
+// Every table, swatch, count and recommendation is meant to derive from one
+// verdict per technology. When that slipped, the report disagreed with itself
+// in print — the firing matrix called a technology a gap while the findings
+// called it a pass — and nothing caught it. Contradictions now stop the build.
+const VALID_RESULTS = ["PASS", "CONFIRMED GAP", "REVIEW REQUIRED", "INCONCLUSIVE"];
+const EXPECTED_STATUS = {
+  "PASS": "green", "CONFIRMED GAP": "red",
+  "REVIEW REQUIRED": "amber", "INCONCLUSIVE": "grey",
+};
+
+function validateConsistency(summary, findings) {
+  const problems = [];
+  const canonical = new Map(findings.map((f) => [f.technology, f]));
+
+  for (const f of findings) {
+    if (!VALID_RESULTS.includes(f.technical_result)) {
+      problems.push(`${f.technology}: unknown technical_result ${JSON.stringify(f.technical_result)}`);
+    }
+    if (f.result !== f.technical_result) {
+      problems.push(`${f.technology}: result ${f.result} disagrees with technical_result ${f.technical_result}`);
+    }
+    if (f.technical_result === "CONFIRMED GAP" && !(f.evidence || []).length) {
+      problems.push(`${f.technology}: a confirmed gap with no supporting evidence`);
+    }
+  }
+
+  const counted = new Map([["CONFIRMED GAP", "confirmed"], ["REVIEW REQUIRED", "review"],
+                           ["PASS", "passed"], ["INCONCLUSIVE", "inconclusive"]]);
+  const counts = summary.result_counts || {};
+  for (const [result, key] of counted) {
+    const actual = findings.filter((f) => f.technical_result === result).length;
+    if ((counts[key] ?? actual) !== actual) {
+      problems.push(`result_counts.${key} says ${counts[key]} but ${actual} findings are ${result}`);
+    }
+  }
+
+  for (const m of summary.tracker_matrix || []) {
+    const f = canonical.get(m.tracker);
+    if (!f) continue;
+    if (m.classification !== f.technical_result) {
+      problems.push(`${m.tracker}: firing matrix says "${m.classification}", findings say "${f.technical_result}"`);
+    }
+  }
+
+  for (const r of summary.technology_matrix || []) {
+    const want = EXPECTED_STATUS[r.technical_result];
+    if (want && r.status !== want) {
+      problems.push(`${r.technology}: ${r.technical_result} should be ${want}, status is ${r.status}`);
+    }
+    if (r.legal_note && r.technical_result !== "PASS") {
+      problems.push(`${r.technology}: a legal note is attached to a ${r.technical_result}, which conflates the two`);
+    }
+  }
+
+  const gapNames = new Set((summary.consent_gaps || []).map((g) => g.tracker));
+  for (const f of findings) {
+    if (f.technical_result === "CONFIRMED GAP" && canonical.has(f.technology) && !gapNames.has(f.technology)
+        && (summary.tracker_matrix || []).some((m) => m.tracker === f.technology)) {
+      problems.push(`${f.technology} is a confirmed gap but is missing from consent_gaps`);
+    }
+  }
+
+  const scen = summary.scenario_counts || {};
+  const listed = (summary.category_scenarios_inconclusive || []).length;
+  if (scen.inconclusive !== undefined && scen.inconclusive !== listed) {
+    problems.push(`scenario_counts.inconclusive says ${scen.inconclusive} but ${listed} scenarios are listed inconclusive`);
+  }
+
+  if (problems.length) {
+    console.error("Report not generated: the findings contradict each other.");
+    for (const p of problems) console.error(`  - ${p}`);
+    console.error("This is a bug in the analyzer, not in the site. Every section must");
+    console.error("derive from one verdict per technology.");
+    process.exit(1);
+  }
+}
+
 function glossaryEntry(term, definition) {
   return new Paragraph({
     spacing: { after: 140 },
@@ -227,6 +306,7 @@ function main() {
   const overallStatus = summary.overall_status || "Inconclusive";
   const counts = summary.result_counts || { confirmed: 0, review: 0, passed: 0, inconclusive: 0 };
   const techFindings = summary.findings || [];
+  validateConsistency(summary, techFindings);
   const confirmedFindings = techFindings.filter((f) => f.result === "CONFIRMED GAP");
   const reviewFindings = techFindings.filter((f) => f.result === "REVIEW REQUIRED");
   const STATUS_COLORS = {
@@ -297,7 +377,16 @@ function main() {
       ? p(`${catInconclusive.length} per-category scenario(s) could not be reliably configured and are reported as inconclusive rather than as passes.`, { italics: true, color: AMBER })
       : null,
     cookieGapsPre.length
-      ? p(`${cookieGapsPre.length} tracking or third-party cookie(s) were set before any consent decision.`, { bold: true, color: RED })
+      ? p((() => {
+          // "third-party" was misleading: these are usually first-party
+          // cookies written by a vendor's script. Naming the owner and the
+          // cookies is both more accurate and more actionable.
+          const owners = [...new Set(cookieGapsPre.map((c) => c.attributed_to).filter(Boolean))];
+          const names = [...new Set(cookieGapsPre.map((c) => c.name))];
+          const survived = cookieGapsReject.length ? " They remained after Reject All." : "";
+          const who = owners.length === 1 ? `${owners[0]} ` : owners.length ? `${owners.join(", ")} ` : "";
+          return `${cookieGapsPre.length} non-essential ${who}cookie(s) were set before any consent decision: ${names.join(", ")}.${survived}`;
+        })(), { bold: true, color: RED })
       : (storageCaptured && authoritative
           ? p("No tracking or third-party cookies were set before a consent decision.", { color: GREEN })
           : (captureUsable
@@ -352,7 +441,7 @@ function main() {
     children.push(makeTable(
       ["Technology", "Vendor", "Purpose", "Pages", "Before consent", "After accept", "After reject", "Status", "Action"],
       techMatrix.map((r) => [
-        r.technology, r.vendor, r.purpose,
+        r.display_name || r.technology, r.vendor, r.purpose,
         r.pages_found == null ? "\u2014" : String(r.pages_found),
         r.before_consent, r.after_accept, r.after_reject,
         { __status: r.status },
@@ -360,7 +449,10 @@ function main() {
       ]),
       [1740, 990, 1210, 572, 1266, 990, 990, 616, 1706]
     ));
-    children.push(p("\u25CF red = fires when it should not, or is obsolete   \u25CF amber = review needed   \u25CF green = behaving correctly", { size: 16, color: MUTED }));
+    children.push(p("\u25CF red = confirmed gap, evidence contradicts the consent state   \u25CF amber = review required, observed but not established   \u25CF green = passed the technical checks   \u25CB grey = inconclusive, not tested", { size: 16, color: MUTED }));
+    if (techMatrix.some((r) => r.legal_note)) {
+      children.push(p("A green result means the implementation behaves correctly. Where a legal question applies to correct behaviour it is noted against that technology rather than counted as a fault: this is a technical audit, not a legal opinion.", { size: 16, color: MUTED, italics: true }));
+    }
     if (pagesVisited.length) {
       children.push(p(`Pages crawled in each state: ${pagesVisited.join(", ")}. "Pages" counts the distinct pages a technology was observed on; a technology gated until Accept is naturally absent from the pre-consent crawl.`, { size: 16, color: MUTED }));
     } else {
@@ -414,6 +506,20 @@ function main() {
     }
   }
 
+  // ---- Legal notes on technically correct implementations ----
+  const legalNoteRows = techMatrix.filter((r) => r.legal_note);
+  if (legalNoteRows.length) {
+    children.push(
+      h1("Legal Notes"),
+      p("These technologies passed the technical checks: the implementation behaves as it should. They are listed because correct behaviour can still raise a question that is legal rather than technical, and that question belongs to counsel, not to an engineer. Nothing here is a defect, and nothing here counts towards the overall status.", { size: 18, color: "555555" }),
+    );
+    for (const r of legalNoteRows) {
+      children.push(h2(r.display_name || r.technology));
+      children.push(p(`Technical result: ${r.technical_result}.`, { size: 18, color: GREEN, bold: true }));
+      children.push(p(r.legal_note));
+    }
+  }
+
   // ---- How the status was reached ----
   children.push(
     h1("How the Overall Status Was Reached"),
@@ -444,14 +550,14 @@ function main() {
   if (matrix.length) {
     children.push(makeTable(
       ["Tracker", "Pre", "Reject", "Accept", "Classification"],
-      matrix.map((m) => [m.tracker, yn(m.pre_consent), yn(m.post_reject), yn(m.post_accept), m.classification]),
+      matrix.map((m) => [m.display_name || m.tracker, yn(m.pre_consent), yn(m.post_reject), yn(m.post_accept), m.classification]),
       [3081, 770, 880, 880, 4469],
       matrix.map((m) => sevColor(m.severity))
     ));
     children.push(p("Request volume per tracker, per state:", { bold: true }));
     children.push(makeTable(
       ["Tracker", "Pre-consent", "Post-reject", "Post-accept", "Example endpoint"],
-      matrix.map((m) => [m.tracker, String(m.requests.pre), String(m.requests.postreject), String(m.requests.postaccept), (m.example_url || "").slice(0, 60)]),
+      matrix.map((m) => [m.display_name || m.tracker, String(m.requests.pre), String(m.requests.postreject), String(m.requests.postaccept), (m.example_url || "").slice(0, 60)]),
       [2421, 1210, 1210, 1210, 4029]
     ));
   } else {
@@ -472,7 +578,7 @@ function main() {
     p("These were treated as strictly necessary (e.g. anti-spam, CAPTCHA, fraud prevention, payments) and so are excluded from the gap count above — but they did run, and their firing pattern is shown here. Whether each genuinely qualifies as \"strictly necessary\" is a legal determination that should be confirmed by whoever signs off on this audit."),
   );
   const necRows = matrix.filter((m) => m.allowlisted_as_necessary)
-    .map((m) => [m.tracker, yn(m.pre_consent), yn(m.post_reject), yn(m.post_accept), m.severity === "review" ? "Confirm classification" : "Not observed pre-consent"]);
+    .map((m) => [m.display_name || m.tracker, yn(m.pre_consent), yn(m.post_reject), yn(m.post_accept), m.severity === "review" ? "Confirm classification" : "Not observed pre-consent"]);
   children.push(necRows.length
     ? makeTable(["Service", "Pre", "Reject", "Accept", "Action"], necRows, [2861, 770, 880, 880, 4689])
     : p("No allowlisted necessary services were observed."));
@@ -670,9 +776,16 @@ function main() {
   if (!captureUsable) {
     recs.push(bullet(`Re-run the capture: the site did not load in ${captureErrors.length} of 3 consent states, so this audit reached no conclusion. Every other item in this report is limited to what the states that did load revealed.`));
   }
-  if (hasGaps) {
-    recs.push(bullet("Move any tracker listed with 'Fired Pre-Consent: Yes' behind the consent management platform's gating logic immediately — this is the highest-severity finding."));
-    recs.push(bullet("For trackers still active after rejection, confirm the CMP's 'Reject All' action is correctly wired to block that specific tag."));
+  // Derived from each technology's own verdict. The previous rule told the
+  // reader to gate "any tracker listed with Fired Pre-Consent: Yes", which
+  // under this engine would mean blocking a container that has to load early
+  // and traffic that consent mode is handling correctly — breaking a working
+  // implementation on the strength of a request having been seen.
+  for (const f of confirmedFindings) {
+    recs.push(bullet(`${f.display_name || f.technology}: ${f.action}. ${f.evidence[0] || ""}`));
+  }
+  for (const f of reviewFindings) {
+    recs.push(bullet(`${f.display_name || f.technology}: ${f.action}. This is not a confirmed fault \u2014 it is what still needs establishing.`));
   }
   if (catViolations.length) {
     const byCat = [...new Set(catViolations.map((v) => v.category))];
@@ -687,14 +800,19 @@ function main() {
   if (legacyTags.length) {
     recs.push(bullet(`Remove the legacy tag(s) for ${legacyTags.map((d) => d.tracker).join(", ")}. Universal Analytics no longer processes data, so these collect nothing while still setting cookies and contacting the vendor.`));
   }
-  const consentModeRows = techMatrix.filter((r) => r.action === "Verify consent mode configuration");
-  if (consentModeRows.length) {
-    recs.push(bullet(`Confirm with counsel whether the cookieless pings sent before consent by ${consentModeRows.map((r) => r.technology).join(", ")} are acceptable in the relevant jurisdictions. These requests carry no storage access, which is consent mode working as designed, but they are still a contact with the vendor before the visitor has chosen.`));
+  // Legal notes attach to technologies that PASSED. They are raised as
+  // questions for counsel, never as remediation, because there is nothing here
+  // for an engineer to fix.
+  const withLegalNotes = techMatrix.filter((r) => r.legal_note);
+  if (withLegalNotes.length) {
+    recs.push(bullet(`No change is required for ${withLegalNotes.map((r) => r.display_name || r.technology).join(", ")}: these passed the technical checks. Counsel may still wish to consider the data transmitted by their cookieless requests \u2014 see the legal notes against each.`));
   }
-  if (cookieGapsPre.length) {
+  if (cookieGapsPre.length && !confirmedFindings.length) {
+    // Only when no technology finding already covers them; otherwise this
+    // repeats a root finding as though it were a separate problem.
     recs.push(bullet("Remove or defer the cookies listed under 'Cookies Set Before Consent'. Note that blocking a tracker's network requests does not by itself stop a cookie already written by inline JavaScript."));
   }
-  if (cookieGapsReject.length) {
+  if (cookieGapsReject.length && !confirmedFindings.length) {
     recs.push(bullet("Cookies persisting after 'Reject All' should be actively deleted by the CMP, not merely left un-refreshed."));
   }
   if (necessary.length) {
@@ -731,7 +849,7 @@ function main() {
     glossaryEntry("First-party / third-party", "First-party is served from the site's own domain, third-party from someone else's. The distinction matters legally and technically, but it is not a reliable guide to who ends up with the data - see server-side tagging."),
     glossaryEntry("Tag manager", "A container, usually Google Tag Manager, that loads other tracking tags. Because tags are configured inside it rather than in the site's code, a tag can be added or changed without any website release."),
     glossaryEntry("Pixel", "A small request to an advertising platform that reports a visit or an action. It needs no visible content on the page; the request itself carries the data."),
-    glossaryEntry("Cookieless ping", "A tracking request that sends data without setting or reading a cookie. It still transmits the visitor's IP address, the page URL and browser characteristics, so it is still personal data processing and still requires consent - but it leaves no cookie behind, so a cookie-only check misses it. This audit inspects network requests as well as cookies, so these are captured."),
+    glossaryEntry("Cookieless ping", "A tracking request that sends data without reading or writing a conventional analytics or advertising cookie. It may still involve processing personal data, such as the visitor's IP address, the page URL and browser or device characteristics. Whether consent or another legal basis is required depends on the jurisdiction, the purpose and the implementation. Because it leaves no cookie behind, a cookie-only check misses it entirely; this audit inspects network requests as well as cookies, so these are captured."),
     glossaryEntry("Server-side tagging", "Routing tracking data through the site's own servers, or a subdomain of the site, before forwarding it to the advertising platform. It makes third-party tracking look first-party. Where the forwarded request still carries a recognisable signature this audit detects it; where data is sent server-to-server and never touches the browser, such as Meta's Conversions API or GA4's Measurement Protocol, no browser-based audit can observe it and confirming it requires access to the tag configuration."),
     glossaryEntry("Remarketing", "Tagging a visitor so they can be shown adverts for this site elsewhere on the internet. It is advertising rather than analytics, and it requires consent."),
     glossaryEntry("Session and persistent cookies", "A session cookie is discarded when the browser closes. A persistent cookie has a fixed lifetime, shown in this report in days."),

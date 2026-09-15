@@ -51,6 +51,34 @@ RESULT_INCONCLUSIVE = "INCONCLUSIVE"
 # individually instead.
 CONTAINER_PURPOSES = ("Tag container", "Consent management")
 
+# One mapping from result to colour, so a swatch can never disagree with the
+# verdict it is supposed to illustrate.
+RESULT_STATUS = {
+    RESULT_PASS: "green",
+    RESULT_GAP: "red",
+    RESULT_REVIEW: "amber",
+    RESULT_INCONCLUSIVE: "grey",
+}
+
+
+def display_name(tracker, ids):
+    """The name the report shows.
+
+    One signature entry matches both GA4 and Universal Analytics, but calling a
+    G-only install "GA4/UA" asserts a Universal Analytics property that was
+    never observed. The signature key stays as it is; only the label changes.
+    """
+    if tracker == "Google Analytics (GA4/UA)":
+        ga4 = any(i.startswith("G-") for i in ids)
+        ua = any(i.startswith("UA-") for i in ids)
+        if ga4 and ua:
+            return "Google Analytics (GA4 and Universal Analytics)"
+        if ua:
+            return "Universal Analytics (legacy)"
+        if ga4:
+            return "Google Analytics 4 (GA4)"
+    return tracker
+
 STATES = [("pre", "pre.har"), ("postaccept", "postaccept.har"), ("postreject", "postreject.har")]
 
 # capture-summary.json keys each state by the action the capture performed,
@@ -722,6 +750,11 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         pre_cookies_t, reject_cookies_t = by_tracker_pre.get(t, []), by_tracker_reject.get(t, [])
         purpose = (vendors.get(t) or {}).get("purpose") or ""
         evidence = []
+        # Kept apart from the verdict on purpose. A legal question about
+        # otherwise-correct behaviour is not a technical defect, and merging the
+        # two made a properly configured tag indistinguishable from one the
+        # audit genuinely could not resolve.
+        legal_note = None
 
         if not consent_exercised:
             result, confidence = RESULT_INCONCLUSIVE, "none"
@@ -754,10 +787,14 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             # Consent mode working as designed — but the request still reaches
             # the vendor. Never graded PASS: EU regulators have ruled on the
             # transmission itself, not only on cookies.
-            result, confidence = RESULT_REVIEW, "medium"
-            action = "Confirm with counsel whether the pre-consent request is acceptable in the relevant jurisdictions"
-            evidence.append("Sent a request while consent was signalled as DENIED, and created no storage. That is consent mode behaving as designed.")
-            evidence.append("It is not automatically lawful: the request still reaches the vendor carrying the visitor's IP address and page URL. Whether that needs consent is a legal question for the relevant jurisdictions.")
+            result, confidence = RESULT_PASS, "medium"
+            action = "None"
+            evidence.append("Sent a request while consent was signalled as DENIED, and created no storage. The implementation is doing what consent mode specifies.")
+            evidence.append("Storage appears only after consent is granted.")
+            legal_note = ("Cookieless requests still transmit data, typically the visitor's IP address, the page URL "
+                          "and browser characteristics. Whether consent or another legal basis is required depends on "
+                          "jurisdiction, purpose and implementation. That is a question for counsel, not a defect in "
+                          "this implementation.")
         elif in_pre or in_reject:
             result, confidence = RESULT_REVIEW, "low"
             action = "Establish what this request transmits"
@@ -811,12 +848,22 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             "after_reject": row["after_reject"],
             "after_accept": row["after_accept"],
             "result": result,
+            "technical_result": result,
+            "legal_note": legal_note,
             "confidence": confidence,
             "evidence": evidence,
             "action": action,
+            "display_name": display_name(t, row.get("tag_ids") or []),
         })
+        # The row and the finding are one object viewed twice. Every table,
+        # swatch and count downstream reads these, so no section can reach its
+        # own verdict.
         row["action"] = action
         row["result"] = result
+        row["technical_result"] = result
+        row["legal_note"] = legal_note
+        row["status"] = RESULT_STATUS[result]
+        row["display_name"] = display_name(t, row.get("tag_ids") or [])
         row["confidence"] = confidence
 
     # Cookies nothing could be attributed to are their own finding: real
@@ -828,7 +875,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             "vendor": "Unknown", "purpose": "Unidentified",
             "expected_category": "unclassified",
             "before_consent": "Set", "after_reject": "\u2014", "after_accept": "\u2014",
-            "result": RESULT_REVIEW, "confidence": "low",
+            "result": RESULT_REVIEW, "technical_result": RESULT_REVIEW, "legal_note": None,
+            "confidence": "low", "display_name": "Unattributed cookies",
             "evidence": [f"Set before a consent decision with no identifiable owner: {cookie_list(unattributed)}.",
                          "Identify the owner before deciding whether consent was required."],
             "action": "Identify these cookies",
@@ -845,7 +893,8 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             "vendor": "Unknown", "purpose": "Unidentified",
             "expected_category": "unclassified",
             "before_consent": "Contacted", "after_reject": "\u2014", "after_accept": "\u2014",
-            "result": RESULT_REVIEW, "confidence": "low",
+            "result": RESULT_REVIEW, "technical_result": RESULT_REVIEW, "legal_note": None,
+            "confidence": "low", "display_name": "Unidentified third-party domains",
             "evidence": [f"Contacted before a consent decision but absent from the signature list: {', '.join(review_domains)}.",
                          "Not recognising a domain is a limit of the signature list, not evidence of a breach. Attribute them before drawing a conclusion."],
             "action": "Attribute these domains",
@@ -854,6 +903,22 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     # The headline gap list follows the evidence: a technology reaches it only
     # if its finding is CONFIRMED. A cookie-only gap (storage created, no
     # matching request seen) still belongs here, so it is added if missing.
+    # The firing matrix carried its own "GAP - fired before consent" labels,
+    # decided by the rule this engine replaced. Two sections of one report then
+    # disagreed about the same technology. It now shows the canonical verdict.
+    canonical = {f["technology"]: f for f in findings}
+    SEVERITY_OF = {RESULT_GAP: "high", RESULT_REVIEW: "review",
+                   RESULT_PASS: "none", RESULT_INCONCLUSIVE: "none"}
+    for m in matrix:
+        f = canonical.get(m["tracker"])
+        if not f:
+            continue
+        m["classification"] = f["technical_result"]
+        m["technical_result"] = f["technical_result"]
+        m["severity"] = SEVERITY_OF[f["technical_result"]]
+        m["display_name"] = f["display_name"]
+        m["legal_note"] = f["legal_note"]
+
     confirmed = [f for f in findings if f["result"] == RESULT_GAP]
     confirmed_names = {f["technology"] for f in confirmed}
     gaps = [g for g in gaps if g["tracker"] in confirmed_names]
@@ -912,11 +977,20 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         "overall_status": overall_status if results_authoritative else "Inconclusive",
         "observed_nothing": observed_nothing,
         "findings": findings,
+        # Technology verdicts only. A consent-category scenario that could not
+        # be driven is a failure of the test, not of a technology, and folding
+        # the two together reported "0 inconclusive" while two scenarios had
+        # explicitly failed to run.
         "result_counts": {
             "confirmed": len(confirmed),
             "review": len(review),
             "passed": len(passed),
             "inconclusive": len(inconclusive_findings),
+        },
+        "scenario_counts": {
+            "tested": len([c for c in category_tests if c["configured"]]),
+            "inconclusive": len([c for c in category_tests if not c["configured"]]),
+            "violations": len(category_violations),
         },
         "pages_visited": states["postaccept"].get("pages_visited") or states["pre"].get("pages_visited"),
         "trackers_correctly_gated": sorted(correctly_gated),
@@ -1009,6 +1083,12 @@ def main():
     print(f"Overall status: {s['overall_status']}")
     print(f"  Confirmed gaps: {counts['confirmed']}   Review required: {counts['review']}"
           f"   Passed: {counts['passed']}   Inconclusive: {counts['inconclusive']}")
+    sc = s.get("scenario_counts") or {}
+    if sc.get("tested") or sc.get("inconclusive"):
+        print(f"  Consent-category scenarios: {sc.get('tested', 0)} tested, "
+              f"{sc.get('inconclusive', 0)} inconclusive, {sc.get('violations', 0)} violation(s)")
+    if s.get("pages_visited"):
+        print(f"  Pages attributed: {', '.join(s['pages_visited'])}")
     for f in s["findings"]:
         if f["result"] in (RESULT_GAP, RESULT_REVIEW):
             print(f"  [{f['result']}] {f['technology']} ({f['confidence']} confidence)")

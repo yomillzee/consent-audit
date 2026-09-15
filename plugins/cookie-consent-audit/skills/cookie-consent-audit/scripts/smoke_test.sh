@@ -148,9 +148,17 @@ if ga.get("after_accept") != "Full":
     errors.append(f"GA4 post-accept should be a full hit, got {ga.get('after_accept')!r}")
 if ga.get("after_reject") != "Blocked":
     errors.append(f"GA4 post-reject should be blocked, got {ga.get('after_reject')!r}")
-# A cookieless ping is surfaced for review, never silently passed or failed.
-if ga.get("status") != "amber":
-    errors.append(f"a consent-mode ping should be amber for review, got {ga.get('status')!r}")
+# In these fixtures GA4 also writes _ga before consent, so storage evidence
+# decides it: a confirmed gap, and red. The consent-mode ping is not what
+# drives this verdict, and the swatch must follow the verdict.
+if ga.get("technical_result") != "CONFIRMED GAP":
+    errors.append(f"GA4 wrote _ga pre-consent; expected CONFIRMED GAP, got {ga.get('technical_result')!r}")
+if ga.get("status") != "red":
+    errors.append(f"a confirmed gap must be red, got {ga.get('status')!r}")
+# A legal note may only ride on a technically correct implementation.
+for name, row in tech.items():
+    if row.get("legal_note") and row.get("technical_result") != "PASS":
+        errors.append(f"{name}: a legal note must not attach to a {row.get('technical_result')}")
 
 # Duplicate tag: two GTM container ids on one site.
 dupes = {d["tracker"]: d for d in s["duplicate_tags"]}
@@ -164,9 +172,26 @@ if gtm.get("result") != "REVIEW REQUIRED":
 if "repeated identifier" not in gtm.get("action", "").lower() and "remove the repeated" not in gtm.get("action", "").lower():
     errors.append(f"GTM's action should address the repeated identifier, got {gtm.get('action')!r}")
 
-# Correctly gated trackers stay green with no action.
-if tech.get("Meta / Facebook Pixel", {}).get("status") != "green":
-    errors.append("a correctly gated tracker must be green")
+# Meta passes the three headline states but fails the partial-consent case, so
+# it is a confirmed gap and must be red everywhere it appears. The whole point
+# of per-category testing is that the extremes can look clean.
+meta = tech.get("Meta / Facebook Pixel", {})
+if meta.get("technical_result") != "CONFIRMED GAP":
+    errors.append(f"Meta failed a category scenario; expected CONFIRMED GAP, got {meta.get('technical_result')!r}")
+if meta.get("status") != "red":
+    errors.append(f"a confirmed gap must be red, got {meta.get('status')!r}")
+# Every swatch must be derivable from its verdict, with no exceptions.
+EXPECTED = {"PASS": "green", "CONFIRMED GAP": "red",
+            "REVIEW REQUIRED": "amber", "INCONCLUSIVE": "grey"}
+for name, row in tech.items():
+    want = EXPECTED.get(row.get("technical_result"))
+    if want and row.get("status") != want:
+        errors.append(f"{name}: {row.get('technical_result')} should be {want}, got {row.get('status')!r}")
+# The firing matrix must not carry its own opinion.
+canon = {f["technology"]: f["technical_result"] for f in s["findings"]}
+for m in s["tracker_matrix"]:
+    if m["tracker"] in canon and m["classification"] != canon[m["tracker"]]:
+        errors.append(f"{m['tracker']}: firing matrix says {m['classification']!r}, findings say {canon[m['tracker']]!r}")
 if tech.get("reCAPTCHA", {}).get("status") != "green":
     errors.append("an allowlisted necessary service must be green")
 
@@ -603,6 +628,41 @@ HTML
 else
   echo "  SKIPPED (playwright not installed here)"
 fi
+
+echo "== report self-consistency =="
+# The report disagreed with itself in print: the firing matrix labelled a
+# technology a gap while the findings called it a pass, the status swatches
+# followed the replaced rule, and nothing caught either. Contradictions must
+# now stop the build rather than ship.
+CONSIST="$(mktemp -d)"
+for CASE in matrix status counts; do
+  python3 - "$WORK/findings.json" "$CONSIST/$CASE.json" "$CASE" <<'MUTATE'
+import json, sys
+src, dst, case = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(src)); s = d["summary"]
+if case == "matrix":
+    s["tracker_matrix"][0]["classification"] = "PASS"
+elif case == "status":
+    s["technology_matrix"][0]["technical_result"] = "CONFIRMED GAP"
+    s["technology_matrix"][0]["status"] = "green"
+elif case == "counts":
+    s["result_counts"]["confirmed"] = 99
+json.dump(d, open(dst, "w"))
+MUTATE
+  if node "$SCRIPTS/generate_report.js" "$CONSIST/$CASE.json" "X" "https://x.test" \
+       --out "$CONSIST/$CASE.docx" >/dev/null 2>&1; then
+    echo "  FAIL: a report contradicting itself ($CASE) was generated anyway"
+    exit 1
+  fi
+done
+# ...and a consistent report must still build.
+if ! node "$SCRIPTS/generate_report.js" "$WORK/findings.json" "X" "https://x.test" \
+     --out "$CONSIST/ok.docx" >/dev/null 2>&1; then
+  echo "  FAIL: a consistent report was rejected"
+  exit 1
+fi
+rm -rf "$CONSIST"
+echo "  contradictions between sections stop the build; consistent reports pass"
 
 echo "== report =="
 if [ ! -d "$SCRIPTS/node_modules" ]; then
