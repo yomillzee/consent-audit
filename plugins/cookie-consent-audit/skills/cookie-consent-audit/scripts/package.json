@@ -5,6 +5,7 @@
   "description": "Playwright HAR capture + docx report generation for cookie-consent-audit",
   "dependencies": {
     "docx": "^9.7.1",
-    "playwright": "^1.47.0"
+    "playwright": "^1.47.0",
+    "jszip": "^3.10.1"
   }
 }

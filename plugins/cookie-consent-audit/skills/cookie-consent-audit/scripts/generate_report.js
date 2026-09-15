@@ -12,9 +12,10 @@
  */
 const {
   Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell,
-  WidthType, ShadingType, AlignmentType, PageBreak, BorderStyle,
+  WidthType, ShadingType, AlignmentType, BorderStyle, Footer, PageNumber,
 } = require("docx");
 const fs = require("fs");
+const JSZip = require("jszip");
 
 // Ink, not decoration: one accent, a warm neutral for rules, and three status
 // colors that stay distinguishable in greyscale print as well as on screen.
@@ -27,18 +28,35 @@ const RULE = "DFE3E8";      // hairline rules
 const RED = "B3261E";
 const AMBER = "9A6700";
 const GREEN = "1B6E3C";
-const TOTAL_W = 9160;
+const TOTAL_W = 10080; // exactly the text column: 12240 page - 2 x 1080 margin
 
 const NO_BORDER = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
 const HAIRLINE = { style: BorderStyle.SINGLE, size: 2, color: RULE };
 const STATUS_COLOR = { red: RED, amber: AMBER, green: GREEN };
 const STATUS_MARK = { red: "\u25CF", amber: "\u25CF", green: "\u25CF" };
 
-function h1(text) {
-  return new Paragraph({ heading: HeadingLevel.HEADING_1, spacing: { before: 300, after: 150 }, children: [new TextRun({ text, bold: true, color: NAVY })] });
+// keepNext/keepLines stop a heading being stranded at the foot of a page with
+// its table overleaf — the most visible flaw in a generated document. Each
+// top-level section starts on its own page, so a reader can hand one section to
+// a colleague without it beginning halfway down a sheet.
+function h1(text, { pageBreak = true } = {}) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_1,
+    spacing: { before: 300, after: 150 },
+    keepNext: true,
+    keepLines: true,
+    pageBreakBefore: pageBreak,
+    children: [new TextRun({ text, bold: true, color: NAVY })],
+  });
 }
 function h2(text) {
-  return new Paragraph({ heading: HeadingLevel.HEADING_2, spacing: { before: 240, after: 120 }, children: [new TextRun({ text, bold: true, color: NAVY })] });
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_2,
+    spacing: { before: 240, after: 120 },
+    keepNext: true,
+    keepLines: true,
+    children: [new TextRun({ text, bold: true, color: NAVY })],
+  });
 }
 function p(text, opts = {}) {
   return new Paragraph({ spacing: { after: 160 }, children: [new TextRun({ text, ...opts })] });
@@ -82,8 +100,9 @@ function statusCell(status, width) {
 }
 
 function makeTable(headers, rows, widths, rowColors = []) {
-  const headerRow = new TableRow({ tableHeader: true, children: headers.map((t, i) => cell(t, { header: true, width: widths[i] })) });
+  const headerRow = new TableRow({ tableHeader: true, cantSplit: true, children: headers.map((t, i) => cell(t, { header: true, width: widths[i] })) });
   const bodyRows = rows.map((r, idx) => new TableRow({
+    cantSplit: true,
     children: r.map((v, i) => (v && v.__status
       ? statusCell(v.__status, widths[i])
       : cell(v, { width: widths[i], shading: idx % 2 === 1 ? LIGHT : undefined, color: i === 0 ? undefined : rowColors[idx], bold: i === 0 }))),
@@ -187,7 +206,6 @@ function main() {
       : null,
     new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `Prepared ${dateStr}`, size: 20, color: MUTED })] }),
     new Paragraph({ children: [new TextRun({ text: "Network traffic, cookies and web storage captured before consent, after accept, and after reject", size: 19, color: MUTED, italics: true })] }),
-    new Paragraph({ children: [new PageBreak()] }),
 
     h1("Executive Summary"),
     captureUsable
@@ -245,7 +263,7 @@ function main() {
       makeTable(
         ["State", "Outcome"],
         captureErrors.map((e) => [e.state, e.error]),
-        [3160, 6000]
+        [3477, 6603]
       ),
       p("Common causes: the network blocked the site or its trackers, the URL was wrong or redirected, or the browser could not start. Resolve the cause, re-run the capture, and confirm every state reports traffic before issuing this report.", { italics: true }),
     );
@@ -263,7 +281,7 @@ function main() {
         ["Unclassified domains", String(states.pre.unknown_domain_count || 0), String(states.postreject.unknown_domain_count || 0), String(states.postaccept.unknown_domain_count || 0)],
         ["Cookies set", String((summary.cookie_counts || {}).pre ?? "n/a"), String((summary.cookie_counts || {}).postreject ?? "n/a"), String((summary.cookie_counts || {}).postaccept ?? "n/a")],
       ],
-      [3160, 2000, 2000, 2000]
+      [3477, 2201, 2201, 2201]
     ),
   );
 
@@ -282,7 +300,7 @@ function main() {
         { __status: r.status },
         r.action,
       ]),
-      [1580, 900, 1100, 520, 1150, 900, 900, 560, 1550]
+      [1740, 990, 1210, 572, 1266, 990, 990, 616, 1706]
     ));
     children.push(p("\u25CF red = fires when it should not, or is obsolete   \u25CF amber = review needed   \u25CF green = behaving correctly", { size: 16, color: MUTED }));
     if (pagesVisited.length) {
@@ -294,14 +312,14 @@ function main() {
       children.push(
         h2("Duplicate Deployments"),
         p("These technologies were loaded more than once with different container or measurement IDs. Duplicate tags double-count traffic and can fire outside the consent logic attached to the primary tag."),
-        makeTable(["Technology", "IDs found"], duplicates.map((d) => [d.tracker, d.ids.join(", ")]), [3000, 6160]),
+        makeTable(["Technology", "IDs found"], duplicates.map((d) => [d.tracker, d.ids.join(", ")]), [3301, 6779]),
       );
     }
     if (legacyTags.length) {
       children.push(
         h2("Legacy Tags Still Collecting"),
         p("Universal Analytics stopped processing data in 2023. A tag still firing collects nothing useful while continuing to set cookies and contact the vendor, so it carries the compliance cost of tracking with none of the benefit.", { color: AMBER }),
-        makeTable(["Technology", "IDs found"], legacyTags.map((d) => [d.tracker, d.ids.join(", ") || "\u2014"]), [3000, 6160]),
+        makeTable(["Technology", "IDs found"], legacyTags.map((d) => [d.tracker, d.ids.join(", ") || "\u2014"]), [3301, 6779]),
       );
     }
   }
@@ -315,14 +333,14 @@ function main() {
     children.push(makeTable(
       ["Tracker", "Pre", "Reject", "Accept", "Classification"],
       matrix.map((m) => [m.tracker, yn(m.pre_consent), yn(m.post_reject), yn(m.post_accept), m.classification]),
-      [2800, 700, 800, 800, 4060],
+      [3081, 770, 880, 880, 4469],
       matrix.map((m) => sevColor(m.severity))
     ));
     children.push(p("Request volume per tracker, per state:", { bold: true }));
     children.push(makeTable(
       ["Tracker", "Pre-consent", "Post-reject", "Post-accept", "Example endpoint"],
       matrix.map((m) => [m.tracker, String(m.requests.pre), String(m.requests.postreject), String(m.requests.postaccept), (m.example_url || "").slice(0, 60)]),
-      [2200, 1100, 1100, 1100, 3660]
+      [2421, 1210, 1210, 1210, 4029]
     ));
   } else {
     children.push(p("No trackers from the signature list were observed in any state."));
@@ -333,7 +351,7 @@ function main() {
   children.push(hasGaps
     ? makeTable(["Tracker", "Fired Pre-Consent", "Fired After Reject", "Severity"],
         gaps.map((g) => [g.tracker, yn(g.fired_pre_consent), yn(g.fired_after_reject), g.severity]),
-        [3200, 2000, 2000, 1960], gaps.map((g) => sevColor(g.severity)))
+        [3521, 2201, 2201, 2157], gaps.map((g) => sevColor(g.severity)))
     : p("No trackers fired before consent or after rejection was recorded."));
 
   // ---- Necessary services, shown in full ----
@@ -344,7 +362,7 @@ function main() {
   const necRows = matrix.filter((m) => m.allowlisted_as_necessary)
     .map((m) => [m.tracker, yn(m.pre_consent), yn(m.post_reject), yn(m.post_accept), m.severity === "review" ? "Confirm classification" : "Not observed pre-consent"]);
   children.push(necRows.length
-    ? makeTable(["Service", "Pre", "Reject", "Accept", "Action"], necRows, [2600, 700, 800, 800, 4260])
+    ? makeTable(["Service", "Pre", "Reject", "Accept", "Action"], necRows, [2861, 770, 880, 880, 4689])
     : p("No allowlisted necessary services were observed."));
 
   // ---- Per-category consent testing ----
@@ -362,7 +380,7 @@ function main() {
         String((c.trackers_detected || []).length),
         c.configured ? String(c.violations.length) : "n/a",
       ]),
-      [2600, 2000, 2200, 2360],
+      [2861, 2201, 2421, 2597],
       catTests.map((c) => (!c.configured ? AMBER : c.violations.length ? RED : GREEN))
     ));
 
@@ -372,7 +390,7 @@ function main() {
       children.push(makeTable(
         ["Tracker", "Its category", "Fired when only this was granted", "Requests"],
         catViolations.map((v) => [v.tracker, v.category, v.granted_category, String(v.requests)]),
-        [2800, 2000, 2800, 1560],
+        [3081, 2201, 3081, 1717],
         catViolations.map(() => RED)
       ));
     }
@@ -383,7 +401,7 @@ function main() {
       children.push(makeTable(
         ["Scenario", "Why it could not be tested"],
         catInconclusive.map((c) => [c.granted, c.inconclusive_reason || "unknown"]),
-        [2400, 6760]
+        [2641, 7439]
       ));
     }
 
@@ -398,7 +416,7 @@ function main() {
       children.push(makeTable(
         ["Category control", "Detected as", "Set to"],
         c.toggles.map((t) => [t.label || "(unlabelled)", t.category, t.wanted ? "Allowed" : "Denied"]),
-        [4600, 2280, 2280]
+        [5062, 2509, 2509]
       ));
     }
   }
@@ -415,7 +433,7 @@ function main() {
       children.push(makeTable(
         ["Cookie", "Domain", "Attributed To", "Lifetime", "Third-party"],
         cookieGapsPre.map((c) => [c.name, c.registrable_domain, c.attributed_to || "Unidentified", c.session_cookie ? "Session" : `${c.expires_days} days`, yn(c.third_party)]),
-        [2200, 2200, 2200, 1400, 1160], cookieGapsPre.map(() => RED)
+        [2420, 2421, 2421, 1541, 1277], cookieGapsPre.map(() => RED)
       ));
     } else {
       children.push(h2("Cookies Set Before Consent"), p("None — no tracking or third-party cookies were present before a consent decision.", { color: GREEN }));
@@ -426,7 +444,7 @@ function main() {
       children.push(makeTable(
         ["Cookie", "Domain", "Attributed To", "Lifetime", "Third-party"],
         cookieGapsReject.map((c) => [c.name, c.registrable_domain, c.attributed_to || "Unidentified", c.session_cookie ? "Session" : `${c.expires_days} days`, yn(c.third_party)]),
-        [2200, 2200, 2200, 1400, 1160], cookieGapsReject.map(() => AMBER)
+        [2420, 2421, 2421, 1541, 1277], cookieGapsReject.map(() => AMBER)
       ));
     }
 
@@ -438,7 +456,7 @@ function main() {
         ? makeTable(
             ["Cookie", "Domain", "Lifetime", "Third-party", "Attributed To"],
             cookies.map((c) => [c.name, c.registrable_domain, c.session_cookie ? "Session" : `${c.expires_days}d`, yn(c.third_party), c.attributed_to || "—"]),
-            [2400, 2200, 1400, 1300, 1860],
+            [2640, 2421, 1541, 1431, 2047],
             cookies.map((c) => (c.long_lived ? AMBER : undefined)))
         : p("No cookies observed in this state."));
       const ls = st.local_storage || [];
@@ -464,7 +482,7 @@ function main() {
     ? makeTable(
         ["Domain", "Pre", "Reject", "Accept", "Identified As"],
         tpKeys.map((d) => [d, String(tpAll[d].pre || 0), String(tpAll[d].postreject || 0), String(tpAll[d].postaccept || 0), tpAll[d].tracker || "Unclassified"]),
-        [3200, 700, 800, 800, 3660],
+        [3521, 770, 880, 880, 4029],
         tpKeys.map((d) => (!tpAll[d].tracker && tpAll[d].pre ? AMBER : undefined)))
     : p("No third-party domains were contacted."));
 
@@ -475,7 +493,7 @@ function main() {
       p("The score is a transparent deduction rubric, not a legal grade or a certification. It starts at 100 and subtracts for each finding below, so every point lost maps to something named in this report and can be argued with. A high score is not a statement of legal compliance, which depends on jurisdiction and on how the site declares its own cookie categories."),
     );
     children.push(healthDeductions.length
-      ? makeTable(["Points", "Finding"], healthDeductions.map((d) => [`-${d.points}`, d.reason]), [1200, 7960])
+      ? makeTable(["Points", "Finding"], healthDeductions.map((d) => [`-${d.points}`, d.reason]), [1321, 8759])
       : p("No deductions were applied: no consent gaps, duplicate tags or legacy tags were observed.", { color: GREEN }));
     children.push(p(`Starting score 100, less ${healthDeductions.reduce((a, d) => a + d.points, 0)} points, gives ${healthScore}.`, { bold: true }));
   }
@@ -542,17 +560,95 @@ function main() {
     styles: { default: { document: { run: { font: "Calibri", size: 22 } } } },
     sections: [
       {
-        properties: { page: { size: { width: 12240, height: 15840 }, margin: { top: 1080, bottom: 1080, left: 1080, right: 1080 } } },
+        properties: {
+          titlePage: true, // the cover carries no page number
+          page: { size: { width: 12240, height: 15840 }, margin: { top: 1080, bottom: 1080, left: 1080, right: 1080 } },
+        },
+        footers: {
+          first: new Footer({ children: [new Paragraph({ children: [] })] }),
+          default: new Footer({
+            children: [new Paragraph({
+              alignment: AlignmentType.RIGHT,
+              children: [new TextRun({
+                children: [`${siteName}  \u00B7  Page `, PageNumber.CURRENT, " of ", PageNumber.TOTAL_PAGES],
+                size: 16,
+                color: MUTED,
+              })],
+            })],
+          }),
+        },
         // Conditional summary lines above evaluate to null when they don't apply.
         children: children.filter(Boolean),
       },
     ],
   });
 
-  Packer.toBuffer(doc).then((buf) => {
-    fs.writeFileSync(outPath, buf);
-    console.log(`Report written to ${outPath}`);
-  });
+  Packer.toBuffer(doc)
+    .then((buf) => collapseHeadings(buf, COLLAPSED_SECTIONS))
+    .then((buf) => {
+      fs.writeFileSync(outPath, buf);
+      console.log(`Report written to ${outPath}`);
+    })
+    .catch((err) => {
+      console.error(`Failed to write report: ${err.message}`);
+      process.exitCode = 1;
+    });
+}
+
+// Sections that open folded away. These are exhaustive reference dumps: a
+// reader needs them to check a specific cookie, not to understand the finding,
+// and at full length they bury the sections that carry the conclusions.
+//
+// This is a reading convenience in Word on the desktop only. Word Online,
+// LibreOffice, Google Docs and every PDF export ignore it and show the section
+// expanded, so it never hides anything from the record — the content is present
+// and complete either way.
+const COLLAPSED_SECTIONS = ["Cookies and Web Storage"];
+
+// Word folds a heading when its paragraph carries <w:collapsed/>. The docx
+// library has no API for it, so the packed file is patched after the fact.
+async function collapseHeadings(buf, headings) {
+  if (!headings || !headings.length) return buf;
+  const zip = await JSZip.loadAsync(buf);
+  const entry = zip.file("word/document.xml");
+  if (!entry) return buf;
+
+  let xml = await entry.async("string");
+  for (const heading of headings) {
+    const patched = withCollapsed(xml, heading);
+    if (patched === null) {
+      // Worth saying out loud: a renamed section would otherwise silently stop
+      // collapsing, and the only symptom is a report that reads as too long.
+      console.warn(`  Note: "${heading}" not found as a heading; it will open expanded.`);
+    } else {
+      xml = patched;
+    }
+  }
+
+  zip.file("word/document.xml", xml);
+  return zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+}
+
+// Returns the patched XML, or null if the heading could not be located — never
+// a silently unchanged document.
+function withCollapsed(xml, headingText) {
+  const escaped = headingText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const at = xml.indexOf(`<w:t xml:space="preserve">${escaped}</w:t>`);
+  if (at === -1) return null;
+
+  const pStart = xml.lastIndexOf("<w:p>", at);
+  if (pStart === -1) return null;
+  const pPrStart = xml.indexOf("<w:pPr>", pStart);
+  const pPrEnd = xml.indexOf("</w:pPr>", pStart);
+  if (pPrStart === -1 || pPrEnd === -1 || pPrStart > at || pPrEnd > at) return null;
+
+  const pPr = xml.slice(pPrStart, pPrEnd);
+  if (!/<w:pStyle w:val="Heading/.test(pPr)) return null; // only real headings fold
+  if (pPr.includes("<w:collapsed/>")) return xml;
+
+  // Immediately after <w:pStyle/>, which is where Word itself writes it.
+  const styleClose = xml.indexOf("/>", xml.indexOf("<w:pStyle", pPrStart)) + 2;
+  return xml.slice(0, styleClose) + "<w:collapsed/>" + xml.slice(styleClose);
 }
 
 main();
