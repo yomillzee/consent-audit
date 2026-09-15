@@ -220,12 +220,22 @@ function main() {
   const techMatrix = summary.technology_matrix || [];
   const duplicates = summary.duplicate_tags || [];
   const legacyTags = summary.legacy_tags || [];
-  const healthScore = summary.health_score;
-  const healthDeductions = summary.health_deductions || [];
+  // A band, not a number. The old 0-100 score could deduct past 100 and floor
+  // at zero, so a site with six problems and one with twenty both read 0/100 —
+  // precision the evidence never supported. Bands rest on CONFIRMED findings;
+  // uncertainty moves the status to "Minor Issues" at worst, never to failure.
+  const overallStatus = summary.overall_status || "Inconclusive";
+  const counts = summary.result_counts || { confirmed: 0, review: 0, passed: 0, inconclusive: 0 };
+  const techFindings = summary.findings || [];
+  const confirmedFindings = techFindings.filter((f) => f.result === "CONFIRMED GAP");
+  const reviewFindings = techFindings.filter((f) => f.result === "REVIEW REQUIRED");
+  const STATUS_COLORS = {
+    "Healthy": GREEN, "Minor Issues": AMBER,
+    "Action Required": RED, "Significant Issues": RED, "Inconclusive": MUTED,
+  };
   // Necessary services are infrastructure, not marketing technology, so the
   // headline platform count leaves them out - it is what a client recognizes.
   const platforms = techMatrix.filter((r) => !r.allowlisted_as_necessary);
-  const scoreColor = healthScore == null ? MUTED : healthScore >= 85 ? GREEN : healthScore >= 60 ? AMBER : RED;
   const pagesVisited = summary.pages_visited || [];
 
   // Reference tables collected while the body is built, emitted at the end.
@@ -245,12 +255,8 @@ function main() {
     }),
     new Paragraph({ spacing: { after: 60 }, children: [new TextRun({ text: siteName, size: 30, color: INK, bold: true })] }),
     new Paragraph({ spacing: { after: 400 }, children: [new TextRun({ text: siteUrl, size: 22, color: MUTED })] }),
-    healthScore == null
-      ? null
-      : new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `${healthScore}`, bold: true, size: 96, color: scoreColor })] }),
-    healthScore == null
-      ? null
-      : new Paragraph({ spacing: { after: 500 }, children: [new TextRun({ text: "OVERALL TRACKING HEALTH  /  100", size: 17, color: MUTED, allCaps: true })] }),
+    new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: overallStatus, bold: true, size: 56, color: STATUS_COLORS[overallStatus] || MUTED })] }),
+    new Paragraph({ spacing: { after: 500 }, children: [new TextRun({ text: "OVERALL STATUS", size: 17, color: MUTED, allCaps: true })] }),
     captureUsable
       ? null
       : new Paragraph({ spacing: { before: 200, after: 400 }, children: [new TextRun({ text: "INCONCLUSIVE — CAPTURE INCOMPLETE, DO NOT RELY ON THESE RESULTS", bold: true, size: 24, color: RED })] }),
@@ -263,11 +269,10 @@ function main() {
     execSummaryHeading,
     captureUsable
       ? scorecard([
-          ...(healthScore == null ? [] : [{ value: `${healthScore}`, label: "Health / 100", color: scoreColor }]),
-          { value: platforms.length, label: "Platforms", color: ACCENT },
-          { value: gaps.length + catViolations.length, label: "Consent violations", color: (gaps.length + catViolations.length) ? RED : GREEN },
-          { value: duplicates.length, label: "Duplicate tags", color: duplicates.length ? AMBER : GREEN },
-          { value: legacyTags.length, label: "Legacy scripts", color: legacyTags.length ? AMBER : GREEN },
+          { value: counts.confirmed, label: "Confirmed gaps", color: counts.confirmed ? RED : GREEN },
+          { value: counts.review, label: "Review required", color: counts.review ? AMBER : GREEN },
+          { value: counts.passed, label: "Passed checks", color: GREEN },
+          { value: counts.inconclusive, label: "Inconclusive", color: counts.inconclusive ? AMBER : MUTED },
         ])
       : null,
     captureUsable ? p("", { size: 10 }) : null,
@@ -376,6 +381,60 @@ function main() {
       );
     }
   }
+
+  // ---- Confirmed findings, each with the evidence behind it ----
+  children.push(h1("Confirmed Findings"));
+  if (!captureUsable || !consentExercised) {
+    children.push(p("The capture did not establish a consent decision, so nothing has been confirmed either way. Repair the capture and re-run before treating any part of this report as a finding.", { bold: true, color: RED }));
+  } else if (!confirmedFindings.length) {
+    children.push(p("Nothing met the evidence bar for a confirmed gap. Items that were observed but could not be established either way are listed under Items Requiring Review.", { color: GREEN }));
+  } else {
+    children.push(p("One entry per root problem, with the observations supporting it listed underneath. A technology appears once however many symptoms it produced: a request before consent, a cookie created, and that cookie surviving rejection are usually three faces of one misconfiguration, and listing them separately would treble the apparent workload without adding a single fix.", { size: 18, color: "555555" }));
+    for (const f of confirmedFindings) {
+      children.push(h2(`${f.technology} — ${f.purpose}`));
+      children.push(p(`Expected consent category: ${f.expected_category}.   Confidence: ${f.confidence}.`, { size: 18, color: MUTED }));
+      for (const line of f.evidence) children.push(bullet(line));
+      children.push(p(`Recommended fix: ${f.action}`, { bold: true, color: NAVY }));
+    }
+  }
+
+  // ---- Observed, but not established either way ----
+  children.push(h1("Items Requiring Review"));
+  if (!reviewFindings.length) {
+    children.push(p("Nothing was left unresolved.", { color: GREEN }));
+  } else {
+    children.push(p("These were observed but the evidence does not support calling them violations. They are listed so they can be checked, not so they can be counted against the site. Uncertainty is not failure, and none of these contributed to the overall status beyond \u201CMinor Issues\u201D.", { size: 18, color: "555555" }));
+    for (const f of reviewFindings) {
+      children.push(h2(`${f.technology}${f.purpose && f.purpose !== "Unidentified" ? ` \u2014 ${f.purpose}` : ""}`));
+      children.push(p(`Confidence: ${f.confidence}.`, { size: 18, color: MUTED }));
+      for (const line of f.evidence) children.push(bullet(line));
+      if (f.action && f.action !== "None") {
+        children.push(p(`Suggested check: ${f.action}`, { bold: true, color: NAVY }));
+      }
+    }
+  }
+
+  // ---- How the status was reached ----
+  children.push(
+    h1("How the Overall Status Was Reached"),
+    p(`This report is graded ${overallStatus}.`, { bold: true, size: 24, color: STATUS_COLORS[overallStatus] || MUTED }),
+    p("The status rests on confirmed findings only. Items under review cannot push a site past \u201CMinor Issues\u201D, because an observation the audit could not resolve is a reason to look, not a verdict. Equally, a confirmed finding cannot be offset by passing checks elsewhere.", { size: 18, color: "555555" }),
+    makeTable(
+      ["Status", "When it applies"],
+      [
+        ["Healthy", "No confirmed gaps and nothing requiring review"],
+        ["Minor Issues", "No confirmed gaps, but items need checking"],
+        ["Action Required", "One or two confirmed gaps"],
+        ["Significant Issues", "Three or more confirmed gaps"],
+        ["Inconclusive", "The capture did not establish a consent decision, so no grade is issued"],
+      ],
+      [3020, 7060],
+      ["Healthy", "Minor Issues", "Action Required", "Significant Issues", "Inconclusive"].map(
+        (b) => (b === overallStatus ? (STATUS_COLORS[b] || MUTED) : undefined)),
+    ),
+    p(`Confirmed gaps: ${counts.confirmed}    Review required: ${counts.review}    Passed checks: ${counts.passed}    Inconclusive: ${counts.inconclusive}`, { bold: true }),
+    p("This is a prioritisation aid, not a legal grade or a certification. Whether any given behaviour is lawful depends on jurisdiction and on how the site declares its own cookie categories.", { italics: true, size: 18, color: "555555" }),
+  );
 
   // ---- Underlying firing matrix, kept for full disclosure ----
   children.push(
@@ -601,18 +660,6 @@ function main() {
     if (!(multiRun.unstable || []).length && multiRun.stability_meaningful !== false) {
       children.push(p(`Every finding reproduced in all ${n} runs.`, { color: GREEN }));
     }
-  }
-
-  // ---- Recommendations ----
-  if (healthScore != null) {
-    children.push(
-      h1("How the Health Score Was Calculated"),
-      p("The score is a transparent deduction rubric, not a legal grade or a certification. It starts at 100 and subtracts for each finding below, so every point lost maps to something named in this report and can be argued with. A high score is not a statement of legal compliance, which depends on jurisdiction and on how the site declares its own cookie categories."),
-    );
-    children.push(healthDeductions.length
-      ? makeTable(["Points", "Finding"], healthDeductions.map((d) => [`-${d.points}`, d.reason]), [1321, 8759])
-      : p("No deductions were applied: no consent gaps, duplicate tags or legacy tags were observed.", { color: GREEN }));
-    children.push(p(`Starting score 100, less ${healthDeductions.reduce((a, d) => a + d.points, 0)} points, gives ${healthScore}.`, { bold: true }));
   }
 
   children.push(h1("Recommendations"));

@@ -36,6 +36,21 @@ DEFAULT_COOKIE_FUNCTIONS_PATH = os.path.join(os.path.dirname(__file__), "cookie_
 # points remediation at the wrong thing.
 NON_CONSENT_FUNCTIONS = ("security", "consent")
 
+# Four states, because two are not enough to be honest with. A request observed
+# is not the same as a violation demonstrated, and uncertainty must not be
+# converted into failure — nor quietly into a pass.
+RESULT_PASS = "PASS"
+RESULT_GAP = "CONFIRMED GAP"
+RESULT_REVIEW = "REVIEW REQUIRED"
+RESULT_INCONCLUSIVE = "INCONCLUSIVE"
+
+# A tag container has to load early: it is what establishes the consent
+# defaults and gates everything downstream. Advising a client to defer it
+# breaks the very mechanism the audit is checking for, so a container loading
+# before consent is expected behaviour and the tags it loads are judged
+# individually instead.
+CONTAINER_PURPOSES = ("Tag container", "Consent management")
+
 STATES = [("pre", "pre.har"), ("postaccept", "postaccept.har"), ("postreject", "postreject.har")]
 
 # capture-summary.json keys each state by the action the capture performed,
@@ -627,32 +642,6 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             "allowlisted_as_necessary": allowlisted,
         })
 
-    # --- Tracking health ------------------------------------------------------
-    # A transparent deduction rubric, not a legal grade. Every point lost maps to
-    # a finding listed in the report so the number can be argued with.
-    unclassified_pre = [d for d, v in all_third_party.items() if not v["tracker"] and v["pre"]]
-    deductions = []
-    for g in gaps:
-        if g["fired_pre_consent"] and g["fired_after_reject"]:
-            deductions.append((20, f"{g['tracker']} ignores consent entirely (fires before consent and after reject)"))
-        elif g["fired_pre_consent"]:
-            deductions.append((10, f"{g['tracker']} fires before a consent decision"))
-        else:
-            deductions.append((15, f"{g['tracker']} still fires after reject"))
-    for v in category_violations:
-        deductions.append((10, f"{v['tracker']} fired while '{v['category']}' was denied"))
-    for d in legacy_tags:
-        deductions.append((5, f"{d['tracker']} is a legacy tag still collecting"))
-    for d in duplicate_tags:
-        deductions.append((5, f"{d['tracker']} has a repeated identifier ({d['evidence']})"))
-    if unclassified_pre:
-        deductions.append((min(10, 2 * len(unclassified_pre)),
-                           f"{len(unclassified_pre)} unclassified third-party domain(s) contacted before consent"))
-    for c in cookie_gaps:
-        deductions.append((5, f"{c['name']} cookie set before a consent decision"))
-
-    health_score = max(0, 100 - sum(d[0] for d in deductions))
-
     # A state that never loaded observed nothing. Surfacing that here keeps an
     # empty gap list from being presented downstream as a clean result.
     states_inconclusive = [k for k, _ in STATES if not states[k]["usable"]]
@@ -670,6 +659,197 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     # Only a capture that both loaded and actually exercised consent supports a
     # verdict. Either failure alone makes an empty finding list meaningless.
     results_authoritative = capture_usable and consent_exercised
+
+    # --- Evidence-based classification ---------------------------------------
+    # One finding per technology, with every observation supporting it attached
+    # underneath. A request before consent, a cookie before consent and the same
+    # cookie after reject are usually three symptoms of ONE misconfiguration;
+    # counting them separately triples the apparent problem and scatters the
+    # remediation across three lines that all have the same fix.
+    unclassified_pre = [d for d, v in all_third_party.items() if not v["tracker"] and v["pre"]]
+
+    def cookie_list(cookies):
+        return ", ".join(sorted({c["name"] for c in cookies}))
+
+    by_tracker_pre, by_tracker_reject = defaultdict(list), defaultdict(list)
+    for c in cookie_gaps:
+        by_tracker_pre[c["attributed_to"]].append(c)
+    for c in cookie_gaps_after_reject:
+        by_tracker_reject[c["attributed_to"]].append(c)
+
+    findings = []
+    for row in technology_matrix:
+        t = row["technology"]
+        pre_sig, reject_sig = signals_for("pre", t), signals_for("postreject", t)
+        in_pre = t in states["pre"].get("trackers", {})
+        in_reject = t in states["postreject"].get("trackers", {})
+        in_accept = t in states["postaccept"].get("trackers", {})
+        pre_cookies_t, reject_cookies_t = by_tracker_pre.get(t, []), by_tracker_reject.get(t, [])
+        purpose = (vendors.get(t) or {}).get("purpose") or ""
+        evidence = []
+
+        if not consent_exercised:
+            result, confidence = RESULT_INCONCLUSIVE, "none"
+            action = "Re-run with working consent selectors"
+            evidence.append("No consent decision was made in this capture, so nothing here was tested against one.")
+        elif t in allowlist:
+            result, confidence = RESULT_PASS, "medium"
+            action = "Confirm the necessity classification with counsel"
+            evidence.append("Labelled strictly necessary, so running before consent is expected. Whether it meets that bar is a legal determination to confirm, not a technical finding.")
+        elif pre_cookies_t:
+            # The strongest evidence available: storage actually created.
+            result, confidence = RESULT_GAP, "high"
+            action = "Stop this tag writing storage before consent, and clear it on Reject"
+            evidence.append(f"Non-essential storage created before any consent decision: {cookie_list(pre_cookies_t)}.")
+            if reject_cookies_t:
+                evidence.append(f"Still present after Reject All: {cookie_list(reject_cookies_t)}.")
+        elif reject_cookies_t:
+            result, confidence = RESULT_GAP, "high"
+            action = "Delete this storage when consent is rejected"
+            evidence.append(f"Storage still present after Reject All: {cookie_list(reject_cookies_t)}.")
+        elif "consent_granted" in pre_sig:
+            result, confidence = RESULT_GAP, "high"
+            action = "Set the tag's consent defaults to denied"
+            evidence.append("Sent a request before any consent decision with consent signalled as GRANTED, so the tag's consent defaults are not set to denied.")
+        elif purpose in CONTAINER_PURPOSES:
+            result, confidence = RESULT_PASS, "medium"
+            action = "None for the container itself; the tags it loads are judged separately"
+            evidence.append("A tag container loads early by design, to establish consent defaults and gate the tags it manages. Loading before consent is expected; the tags it loads are assessed separately in this table.")
+        elif "consent_denied" in pre_sig or "consent_denied" in reject_sig:
+            # Consent mode working as designed — but the request still reaches
+            # the vendor. Never graded PASS: EU regulators have ruled on the
+            # transmission itself, not only on cookies.
+            result, confidence = RESULT_REVIEW, "medium"
+            action = "Confirm with counsel whether the pre-consent request is acceptable in the relevant jurisdictions"
+            evidence.append("Sent a request while consent was signalled as DENIED, and created no storage. That is consent mode behaving as designed.")
+            evidence.append("It is not automatically lawful: the request still reaches the vendor carrying the visitor's IP address and page URL. Whether that needs consent is a legal question for the relevant jurisdictions.")
+        elif in_pre or in_reject:
+            result, confidence = RESULT_REVIEW, "low"
+            action = "Establish what this request transmits"
+            evidence.append(f"A request was observed {'before a consent decision' if in_pre else 'after Reject All'}, but no storage was created and no consent signal could be read, so what was transmitted cannot be established from this capture.")
+        elif in_accept:
+            result, confidence = RESULT_PASS, "high"
+            action = "None"
+            evidence.append("Not observed before a consent decision or after Reject All. Appeared only after Accept All.")
+        else:
+            result, confidence = RESULT_PASS, "low"
+            action = "None"
+            evidence.append("Not observed in any state.")
+
+        # A tag firing when its own category was declined is unambiguous,
+        # whatever the rest of the picture looks like.
+        viols = [v for v in category_violations if v.get("tracker") == t]
+        if viols and consent_exercised:
+            # The evidence gathered above described a technology that looked
+            # clean across the three headline states. It did not survive
+            # per-category testing, and leaving that reasoning in place above
+            # the contradiction would read as a report arguing with itself.
+            if result == RESULT_PASS:
+                evidence = ["Correctly gated across the pre-consent, Accept All and Reject All states."]
+            result, confidence = RESULT_GAP, "high"
+            action = "Register this tag with the consent platform under its own category"
+            for v in viols:
+                evidence.append(
+                    f"But when only '{v.get('granted_category')}' was granted and '{v.get('category')}' was denied, "
+                    f"it fired anyway ({v.get('requests', 0)} request(s)). The partial-consent case is the one that fails."
+                )
+
+        for d in duplicate_tags:
+            if d["tracker"] == t:
+                evidence.append(f"Deployed with a repeated identifier of the same kind ({d['evidence']}), which double-counts measurement.")
+                if result == RESULT_PASS:
+                    result, confidence = RESULT_REVIEW, "medium"
+                    action = "Remove the repeated identifier"
+        for d in legacy_tags:
+            if d["tracker"] == t:
+                evidence.append(f"Legacy tag still collecting ({', '.join(d['ids'])}).")
+                if result == RESULT_PASS:
+                    result, confidence = RESULT_REVIEW, "medium"
+                    action = "Remove the legacy tag"
+
+        findings.append({
+            "technology": t,
+            "vendor": row["vendor"],
+            "purpose": row["purpose"],
+            "expected_category": (service_category.get(t) or "unclassified"),
+            "before_consent": row["before_consent"],
+            "after_reject": row["after_reject"],
+            "after_accept": row["after_accept"],
+            "result": result,
+            "confidence": confidence,
+            "evidence": evidence,
+            "action": action,
+        })
+        row["action"] = action
+        row["result"] = result
+        row["confidence"] = confidence
+
+    # Cookies nothing could be attributed to are their own finding: real
+    # storage, unknown owner. Unknown is a reason to look, not to fail.
+    unattributed = [c for c in cookie_gaps if not c["attributed_to"]]
+    if unattributed and consent_exercised:
+        findings.append({
+            "technology": "Unattributed cookies",
+            "vendor": "Unknown", "purpose": "Unidentified",
+            "expected_category": "unclassified",
+            "before_consent": "Set", "after_reject": "\u2014", "after_accept": "\u2014",
+            "result": RESULT_REVIEW, "confidence": "low",
+            "evidence": [f"Set before a consent decision with no identifiable owner: {cookie_list(unattributed)}.",
+                         "Identify the owner before deciding whether consent was required."],
+            "action": "Identify these cookies",
+        })
+
+    # Unidentified domains are a prompt to investigate, never a failure. The
+    # audit not recognising a domain says something about the signature list,
+    # not about the site.
+    review_domains = []
+    if unclassified_pre and consent_exercised:
+        review_domains = sorted(unclassified_pre)
+        findings.append({
+            "technology": "Unidentified third-party domains",
+            "vendor": "Unknown", "purpose": "Unidentified",
+            "expected_category": "unclassified",
+            "before_consent": "Contacted", "after_reject": "\u2014", "after_accept": "\u2014",
+            "result": RESULT_REVIEW, "confidence": "low",
+            "evidence": [f"Contacted before a consent decision but absent from the signature list: {', '.join(review_domains)}.",
+                         "Not recognising a domain is a limit of the signature list, not evidence of a breach. Attribute them before drawing a conclusion."],
+            "action": "Attribute these domains",
+        })
+
+    # The headline gap list follows the evidence: a technology reaches it only
+    # if its finding is CONFIRMED. A cookie-only gap (storage created, no
+    # matching request seen) still belongs here, so it is added if missing.
+    confirmed = [f for f in findings if f["result"] == RESULT_GAP]
+    confirmed_names = {f["technology"] for f in confirmed}
+    gaps = [g for g in gaps if g["tracker"] in confirmed_names]
+    for f in confirmed:
+        if f["technology"] not in {g["tracker"] for g in gaps}:
+            gaps.append({
+                "tracker": f["technology"],
+                "fired_pre_consent": f["before_consent"] not in ("\u2014", "Blocked"),
+                "fired_after_reject": f["after_reject"] not in ("\u2014", "Blocked"),
+                "severity": "high",
+            })
+    gaps.sort(key=lambda g: g["tracker"])
+    review = [f for f in findings if f["result"] == RESULT_REVIEW]
+    passed = [f for f in findings if f["result"] == RESULT_PASS]
+    inconclusive_findings = [f for f in findings if f["result"] == RESULT_INCONCLUSIVE]
+
+    # Status bands rather than a score. The old rubric could deduct past 100 and
+    # floor at zero, so a site with six problems and a site with twenty both
+    # read 0/100 — false precision that said nothing about how much work was
+    # waiting. Bands rest on CONFIRMED findings only: uncertainty moves the
+    # status at most to "Minor Issues", never to failure.
+    if not results_authoritative or not consent_exercised:
+        overall_status = "Inconclusive"
+    elif len(confirmed) >= 3:
+        overall_status = "Significant Issues"
+    elif confirmed:
+        overall_status = "Action Required"
+    elif review:
+        overall_status = "Minor Issues"
+    else:
+        overall_status = "Healthy"
 
     summary = {
         "site_url": site_url,
@@ -691,10 +871,17 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
         "technology_matrix": technology_matrix,
         "duplicate_tags": duplicate_tags,
         "legacy_tags": legacy_tags,
-        # Suppressed entirely when the capture is unusable: a score computed
-        # from nothing is exactly the false reassurance this report avoids.
-        "health_score": health_score if results_authoritative else None,
-        "health_deductions": [{"points": pts, "reason": why} for pts, why in deductions] if results_authoritative else [],
+        # A band, not a score. Suppressed entirely when the capture is
+        # unusable: a verdict computed from nothing is exactly the false
+        # reassurance this report exists to avoid.
+        "overall_status": overall_status if results_authoritative else "Inconclusive",
+        "findings": findings,
+        "result_counts": {
+            "confirmed": len(confirmed),
+            "review": len(review),
+            "passed": len(passed),
+            "inconclusive": len(inconclusive_findings),
+        },
         "pages_visited": states["postaccept"].get("pages_visited") or states["pre"].get("pages_visited"),
         "trackers_correctly_gated": sorted(correctly_gated),
         "necessary_services_active": sorted(necessary_active),
@@ -768,8 +955,15 @@ def main():
         print("=" * 72)
         print()
 
-    if s["health_score"] is not None:
-        print(f"Tracking health: {s['health_score']}/100")
+    counts = s["result_counts"]
+    print(f"Overall status: {s['overall_status']}")
+    print(f"  Confirmed gaps: {counts['confirmed']}   Review required: {counts['review']}"
+          f"   Passed: {counts['passed']}   Inconclusive: {counts['inconclusive']}")
+    for f in s["findings"]:
+        if f["result"] in (RESULT_GAP, RESULT_REVIEW):
+            print(f"  [{f['result']}] {f['technology']} ({f['confidence']} confidence)")
+            for line in f["evidence"]:
+                print(f"      - {line}")
     if not s["consent_exercised"]:
         print()
         print("=" * 72)

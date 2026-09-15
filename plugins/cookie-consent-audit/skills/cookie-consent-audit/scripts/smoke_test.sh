@@ -26,7 +26,15 @@ errors = []
 
 # --- network-level gap analysis ---
 gaps = {g["tracker"]: g for g in s["consent_gaps"]}
-expected_gaps = {"Google Analytics (GA4/UA)", "Google Tag Manager"}
+# The headline gap list follows the evidence. GTM is deliberately absent: a tag
+# container loading early is how consent defaults get established, so on that
+# basis alone it is not a gap. Meta is present because per-category testing
+# caught it firing while its own category was denied — which the Accept/Reject
+# extremes alone had missed.
+expected_gaps = {"Google Analytics (GA4/UA)", "Meta / Facebook Pixel"}
+# Network-level gating across the three headline states. Meta belongs here AND
+# in the gap list: it passed the extremes and failed the partial-consent case,
+# which is exactly why per-category testing exists.
 expected_gated = {"Meta / Facebook Pixel", "Microsoft Clarity"}
 expected_necessary = {"reCAPTCHA"}
 
@@ -36,11 +44,10 @@ if set(s["trackers_correctly_gated"]) != expected_gated:
     errors.append(f"correctly_gated: expected {sorted(expected_gated)}, got {s['trackers_correctly_gated']}")
 if set(s["necessary_services_active"]) != expected_necessary:
     errors.append(f"necessary: expected {sorted(expected_necessary)}, got {s['necessary_services_active']}")
-# GTM fires pre-consent AND after reject; GA4 only pre-consent.
-if gaps.get("Google Tag Manager", {}).get("fired_after_reject") is not True:
-    errors.append("expected Google Tag Manager to be flagged as firing after reject")
 if gaps.get("Google Analytics (GA4/UA)", {}).get("severity") != "high":
     errors.append("expected Google Analytics gap to be high severity")
+if "Google Tag Manager" in gaps:
+    errors.append("a tag container must not reach the headline gap list for loading early")
 
 # --- full disclosure: nothing observed may be dropped from the matrix ---
 matrix = {m["tracker"]: m for m in s["tracker_matrix"]}
@@ -152,10 +159,10 @@ if "Google Tag Manager" not in dupes:
 if sorted(dupes.get("Google Tag Manager", {}).get("ids", [])) != ["GTM-SECOND", "GTM-TEST"]:
     errors.append(f"duplicate ids wrong: {dupes.get('Google Tag Manager', {}).get('ids')}")
 gtm = tech.get("Google Tag Manager", {})
-if gtm.get("status") != "red":
-    errors.append("GTM fires before consent and after reject - must be red")
-if "duplicate" not in gtm.get("action", ""):
-    errors.append("GTM's action should also mention the duplicate container")
+if gtm.get("result") != "REVIEW REQUIRED":
+    errors.append(f"GTM has a genuine duplicate container, so REVIEW REQUIRED; got {gtm.get('result')!r}")
+if "repeated identifier" not in gtm.get("action", "").lower() and "remove the repeated" not in gtm.get("action", "").lower():
+    errors.append(f"GTM's action should address the repeated identifier, got {gtm.get('action')!r}")
 
 # Correctly gated trackers stay green with no action.
 if tech.get("Meta / Facebook Pixel", {}).get("status") != "green":
@@ -163,16 +170,44 @@ if tech.get("Meta / Facebook Pixel", {}).get("status") != "green":
 if tech.get("reCAPTCHA", {}).get("status") != "green":
     errors.append("an allowlisted necessary service must be green")
 
-# --- health score: a transparent rubric, every point traceable ---
-score = s["health_score"]
-if not isinstance(score, int) or not 0 <= score <= 100:
-    errors.append(f"health_score must be an int in 0..100, got {score!r}")
-if score == 100:
-    errors.append("a capture with known violations must not score 100")
-if not s["health_deductions"]:
-    errors.append("a score below 100 must itemize its deductions")
-if 100 - sum(d["points"] for d in s["health_deductions"]) != score:
-    errors.append("health_score must equal 100 minus its listed deductions")
+# --- status bands, and the evidence rules behind them ---
+counts = s["result_counts"]
+if s["overall_status"] not in ("Healthy", "Minor Issues", "Action Required", "Significant Issues"):
+    errors.append(f"unexpected overall_status {s['overall_status']!r}")
+if s["overall_status"] == "Healthy":
+    errors.append("a capture with known violations must not read Healthy")
+
+by_tech = {f["technology"]: f for f in s["findings"]}
+
+# Storage created before consent is the strongest evidence there is, so it
+# must confirm rather than merely flag for review.
+ga = by_tech.get("Google Analytics (GA4/UA)", {})
+if ga.get("result") != "CONFIRMED GAP":
+    errors.append(f"GA4 wrote _ga before consent; expected CONFIRMED GAP, got {ga.get('result')!r}")
+if not any("_ga" in e for e in ga.get("evidence", [])):
+    errors.append("a confirmed gap must cite the evidence behind it")
+
+# A container loading early is how consent defaults get established. Calling
+# that a violation tells a client to break the mechanism being audited.
+gtm = by_tech.get("Google Tag Manager", {})
+if gtm.get("result") == "CONFIRMED GAP":
+    errors.append("a tag container loading before consent must not be a confirmed gap on that basis alone")
+
+# Not recognising a domain says something about the signature list, not the site.
+dom = by_tech.get("Unidentified third-party domains", {})
+if dom and dom.get("result") != "REVIEW REQUIRED":
+    errors.append(f"unidentified domains must be REVIEW REQUIRED, got {dom.get('result')!r}")
+
+# One technology, one finding, however many symptoms it produced.
+techs = [f["technology"] for f in s["findings"]]
+if len(techs) != len(set(techs)):
+    errors.append("each technology must produce exactly one root finding")
+
+# Uncertainty must never be counted as failure.
+if counts["confirmed"] != len([f for f in s["findings"] if f["result"] == "CONFIRMED GAP"]):
+    errors.append("confirmed count must match the confirmed findings")
+if any(f["result"] == "REVIEW REQUIRED" for f in s["findings"]) and s["overall_status"] == "Healthy":
+    errors.append("review items must move the status off Healthy")
 
 if errors:
     print("ANALYZE FAILED:")
@@ -215,10 +250,8 @@ if s["consent_gaps_authoritative"]:
     errors.append("gap findings must not be authoritative when the capture failed")
 # A score computed from nothing would be the same false reassurance in a
 # friendlier format - a broken capture must yield no number at all.
-if s["health_score"] is not None:
-    errors.append(f"a failed capture must not produce a health score, got {s['health_score']}")
-if s["health_deductions"]:
-    errors.append("a failed capture must not itemize deductions")
+if s["overall_status"] != "Inconclusive":
+    errors.append(f"a failed capture must be graded Inconclusive, got {s['overall_status']!r}")
 if "Tracking health" in stdout:
     errors.append("console must not print a health score for a failed capture")
 
@@ -329,8 +362,8 @@ if s["consent_gaps_authoritative"]:
 if not s["capture_usable"]:
     errors.append("pages loaded, so the capture itself is usable; only consent was untested")
 # The dangerous output: a confident score off an untested banner.
-if s["health_score"] is not None:
-    errors.append(f"no score may be issued when consent was never exercised, got {s['health_score']}")
+if s["overall_status"] != "Inconclusive":
+    errors.append(f"no grade may be issued when consent was never exercised, got {s['overall_status']!r}")
 if "No consent gaps found" in stdout:
     errors.append("console must not print the clean-result line when the banner was never clicked")
 if "NO CONSENT BANNER WAS EXERCISED" not in stdout:
