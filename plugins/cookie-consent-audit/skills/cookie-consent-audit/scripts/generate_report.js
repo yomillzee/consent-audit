@@ -13,6 +13,7 @@
 const {
   Document, Packer, Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell,
   WidthType, ShadingType, AlignmentType, BorderStyle, Footer, PageNumber,
+  Bookmark, InternalHyperlink,
 } = require("docx");
 const fs = require("fs");
 const JSZip = require("jszip");
@@ -39,15 +40,51 @@ const STATUS_MARK = { red: "\u25CF", amber: "\u25CF", green: "\u25CF" };
 // its table overleaf — the most visible flaw in a generated document. Each
 // top-level section starts on its own page, so a reader can hand one section to
 // a colleague without it beginning halfway down a sheet.
+// Every top-level section is bookmarked as it is built, and the contents list
+// is assembled from that registry afterwards. Sections appear conditionally, so
+// deriving the list from what was actually emitted keeps the two in step.
+const tocSections = [];
+
+function anchorFor(text) {
+  return "sec_" + text.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
 function h1(text, { pageBreak = true } = {}) {
+  const anchor = anchorFor(text);
+  tocSections.push({ text, anchor });
   return new Paragraph({
     heading: HeadingLevel.HEADING_1,
     spacing: { before: 300, after: 150 },
     keepNext: true,
     keepLines: true,
     pageBreakBefore: pageBreak,
-    children: [new TextRun({ text, bold: true, color: NAVY })],
+    children: [new Bookmark({ id: anchor, children: [new TextRun({ text, bold: true, color: NAVY })] })],
   });
+}
+
+// Built from bookmarks rather than a Word TOC field on purpose: a TOC field
+// renders blank until fields are refreshed, and forcing a refresh makes Word
+// open the document with an "update fields?" prompt, which on a compliance
+// deliverable reads as though the file is damaged. Static links cost the page
+// numbers and keep everything else, including live links in exported PDFs.
+function contentsPage() {
+  return [
+    new Paragraph({
+      heading: HeadingLevel.HEADING_1,
+      spacing: { before: 300, after: 200 },
+      keepNext: true,
+      keepLines: true,
+      pageBreakBefore: true,
+      children: [new TextRun({ text: "Contents", bold: true, color: NAVY })],
+    }),
+    ...tocSections.map((sec) => new Paragraph({
+      spacing: { after: 90 },
+      children: [new InternalHyperlink({
+        anchor: sec.anchor,
+        children: [new TextRun({ text: sec.text, color: ACCENT, underline: {} })],
+      })],
+    })),
+  ];
 }
 function h2(text) {
   return new Paragraph({
@@ -60,6 +97,15 @@ function h2(text) {
 }
 function p(text, opts = {}) {
   return new Paragraph({ spacing: { after: 160 }, children: [new TextRun({ text, ...opts })] });
+}
+function glossaryEntry(term, definition) {
+  return new Paragraph({
+    spacing: { after: 140 },
+    children: [
+      new TextRun({ text: `${term} — `, bold: true, color: NAVY }),
+      new TextRun({ text: definition, color: INK }),
+    ],
+  });
 }
 function bullet(text, opts = {}) {
   return new Paragraph({ bullet: { level: 0 }, spacing: { after: 80 }, children: [new TextRun({ text, ...opts })] });
@@ -182,6 +228,10 @@ function main() {
   const scoreColor = healthScore == null ? MUTED : healthScore >= 85 ? GREEN : healthScore >= 60 ? AMBER : RED;
   const pagesVisited = summary.pages_visited || [];
 
+  // Held in a variable so the contents list can be spliced in ahead of it once
+  // every section has registered itself.
+  const execSummaryHeading = h1("Executive Summary");
+
   const children = [
     new Paragraph({ spacing: { before: 1600, after: 80 }, children: [new TextRun({ text: "COMPLIANCE REVIEW", size: 20, color: ACCENT, bold: true, allCaps: true })] }),
     new Paragraph({ spacing: { after: 120 }, children: [new TextRun({ text: "Cookie Consent & Tracking Audit", bold: true, size: 52, color: NAVY })] }),
@@ -207,7 +257,7 @@ function main() {
     new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `Prepared ${dateStr}`, size: 20, color: MUTED })] }),
     new Paragraph({ children: [new TextRun({ text: "Network traffic, cookies and web storage captured before consent, after accept, and after reject", size: 19, color: MUTED, italics: true })] }),
 
-    h1("Executive Summary"),
+    execSummaryHeading,
     captureUsable
       ? scorecard([
           ...(healthScore == null ? [] : [{ value: `${healthScore}`, label: "Health / 100", color: scoreColor }]),
@@ -556,6 +606,29 @@ function main() {
     p("Limitations: a state that fails to load produces no observations, and is reported as inconclusive rather than as a clean result. Category assignment for each service is a judgment call and should be checked against the site's own declared cookie categories. First/third-party classification uses a best-effort registrable-domain heuristic. Trackers absent from the signature list appear as unclassified domains rather than named services, and require manual review. A capture reflects one point in time; tag manager changes can alter behavior at any point after it.", { italics: true, color: "555555", size: 18 }),
   );
 
+  // ---- Glossary ----
+  // Terms the body of the report uses without stopping to define, and the two
+  // techniques a cookie-only review would miss entirely.
+  children.push(
+    h1("Glossary"),
+    glossaryEntry("Consent gating", "Holding a tracking technology back until the visitor has actively agreed to it. A banner that records a choice but loads the trackers regardless is not gating anything."),
+    glossaryEntry("Pre-consent", "The state of the page before the visitor has made any choice. Under GDPR only strictly necessary technologies may run here."),
+    glossaryEntry("Consent Management Platform (CMP)", "The software that presents the banner, records the choice and is supposed to enforce it. CookieYes, OneTrust, Cookiebot and Termly are common examples. Installing one does not by itself gate anything; it has to be wired to the tags."),
+    glossaryEntry("First-party / third-party", "First-party is served from the site's own domain, third-party from someone else's. The distinction matters legally and technically, but it is not a reliable guide to who ends up with the data - see server-side tagging."),
+    glossaryEntry("Tag manager", "A container, usually Google Tag Manager, that loads other tracking tags. Because tags are configured inside it rather than in the site's code, a tag can be added or changed without any website release."),
+    glossaryEntry("Pixel", "A small request to an advertising platform that reports a visit or an action. It needs no visible content on the page; the request itself carries the data."),
+    glossaryEntry("Cookieless ping", "A tracking request that sends data without setting or reading a cookie. It still transmits the visitor's IP address, the page URL and browser characteristics, so it is still personal data processing and still requires consent - but it leaves no cookie behind, so a cookie-only check misses it. This audit inspects network requests as well as cookies, so these are captured."),
+    glossaryEntry("Server-side tagging", "Routing tracking data through the site's own servers, or a subdomain of the site, before forwarding it to the advertising platform. It makes third-party tracking look first-party. Where the forwarded request still carries a recognisable signature this audit detects it; where data is sent server-to-server and never touches the browser, such as Meta's Conversions API or GA4's Measurement Protocol, no browser-based audit can observe it and confirming it requires access to the tag configuration."),
+    glossaryEntry("Remarketing", "Tagging a visitor so they can be shown adverts for this site elsewhere on the internet. It is advertising rather than analytics, and it requires consent."),
+    glossaryEntry("Session and persistent cookies", "A session cookie is discarded when the browser closes. A persistent cookie has a fixed lifetime, shown in this report in days."),
+    glossaryEntry("Infrastructure cookie", "A cookie set by a hosting, security or anti-spam service rather than by a tracker - the Cloudflare __cf_bm cookie is the common example. These are usually defensible as necessary, and are listed in full so the classification can be reviewed rather than taken on trust."),
+    glossaryEntry("Strictly necessary", "The legal category of technologies a site may run without consent, because the service the visitor asked for would not work without them. It is a narrow test and a legal determination. Analytics and advertising do not qualify, and convenience is not the same as necessity."),
+    glossaryEntry("Health score", "The prioritisation rubric used in this report, with its arithmetic shown in full. It is a way of ranking what to fix first, not a legal grade or a certification."),
+  );
+
+  const coverEnd = children.indexOf(execSummaryHeading);
+  if (coverEnd !== -1) children.splice(coverEnd, 0, ...contentsPage());
+
   const doc = new Document({
     styles: { default: { document: { run: { font: "Calibri", size: 22 } } } },
     sections: [
@@ -633,22 +706,31 @@ async function collapseHeadings(buf, headings) {
 // a silently unchanged document.
 function withCollapsed(xml, headingText) {
   const escaped = headingText.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  const at = xml.indexOf(`<w:t xml:space="preserve">${escaped}</w:t>`);
-  if (at === -1) return null;
+  const needle = `<w:t xml:space="preserve">${escaped}</w:t>`;
 
-  const pStart = xml.lastIndexOf("<w:p>", at);
-  if (pStart === -1) return null;
-  const pPrStart = xml.indexOf("<w:pPr>", pStart);
-  const pPrEnd = xml.indexOf("</w:pPr>", pStart);
-  if (pPrStart === -1 || pPrEnd === -1 || pPrStart > at || pPrEnd > at) return null;
+  // The contents list repeats every section title, and it comes first in the
+  // document, so the earliest match is a hyperlink rather than the heading.
+  // Walk the occurrences and take the one that sits in a heading paragraph.
+  for (let from = 0; ; ) {
+    const at = xml.indexOf(needle, from);
+    if (at === -1) return null;
+    from = at + needle.length;
 
-  const pPr = xml.slice(pPrStart, pPrEnd);
-  if (!/<w:pStyle w:val="Heading/.test(pPr)) return null; // only real headings fold
-  if (pPr.includes("<w:collapsed/>")) return xml;
+    const pStart = xml.lastIndexOf("<w:p>", at);
+    if (pStart === -1) continue;
+    const pPrStart = xml.indexOf("<w:pPr>", pStart);
+    const pPrEnd = xml.indexOf("</w:pPr>", pStart);
+    if (pPrStart === -1 || pPrEnd === -1 || pPrStart > at || pPrEnd > at) continue;
 
-  // Immediately after <w:pStyle/>, which is where Word itself writes it.
-  const styleClose = xml.indexOf("/>", xml.indexOf("<w:pStyle", pPrStart)) + 2;
-  return xml.slice(0, styleClose) + "<w:collapsed/>" + xml.slice(styleClose);
+    const pPr = xml.slice(pPrStart, pPrEnd);
+    if (!/<w:pStyle w:val="Heading/.test(pPr)) continue;
+    if (pPr.includes("<w:collapsed/>")) return xml;
+
+    // Immediately after <w:pStyle/>, which is where Word itself writes it.
+    const styleClose = xml.indexOf("/>", xml.indexOf("<w:pStyle", pPrStart)) + 2;
+    return xml.slice(0, styleClose) + "<w:collapsed/>" + xml.slice(styleClose);
+  }
 }
+
 
 main();
