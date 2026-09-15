@@ -545,6 +545,44 @@ print("  a page that returns 200 but carries nothing is inconclusive, never Heal
 CHECK
 rm -rf "$BLOCKED"
 
+echo "== late-injected consent banner =="
+# A real client site was reported three times as having no consent banner when
+# it plainly had one. The banner was injected about four seconds after the
+# network went quiet, and detection ran on a fixed pause before it existed.
+# Losing that race looks identical in the logs to a site with no banner, which
+# is the most expensive confusion this tool can produce.
+if node -e "require('playwright')" >/dev/null 2>&1; then
+  BANNER="$(mktemp -d)"
+  cat > "$BANNER/index.html" <<'HTML'
+<!doctype html><html><head><title>Late banner</title></head><body>
+<h1>Home</h1><a href="#">Learn More</a>
+<script>
+setTimeout(function () {
+  var d = document.createElement('div');
+  d.className = 'cky-consent-container';
+  d.innerHTML = '<button data-cky-tag="accept-button">Accept All</button>' +
+                '<button data-cky-tag="reject-button">Reject All</button>';
+  document.body.appendChild(d);
+}, 4000);
+</script></body></html>
+HTML
+  OUT="$(node "$SCRIPTS/capture_har.js" "file://$BANNER/index.html" \
+        --outdir "$BANNER/out" --skip-categories --wait 500 2>&1)"
+  if printf '%s' "$OUT" | grep -q "NOT FOUND"; then
+    echo "  FAIL: a banner injected after load was not detected"
+    printf '%s\n' "$OUT" | sed -n '1,20p'
+    exit 1
+  fi
+  if ! printf '%s' "$OUT" | grep -q "matched via: CookieYes"; then
+    echo "  FAIL: expected the CookieYes profile to match the late banner"
+    exit 1
+  fi
+  rm -rf "$BANNER"
+  echo "  a banner injected 4s after load is still found"
+else
+  echo "  SKIPPED (playwright not installed here)"
+fi
+
 echo "== report =="
 if [ ! -d "$SCRIPTS/node_modules" ]; then
   echo "node_modules missing — run: (cd \"$SCRIPTS\" && npm install)" >&2

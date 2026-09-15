@@ -92,6 +92,63 @@ const CMP_PROFILES = [
 ];
 
 // Fallback: search visible buttons/links by text content.
+// Containers the common CMPs render into. Used to wait for the banner to exist
+// rather than guessing how long it takes to appear.
+const CMP_CONTAINERS = [
+  '[data-cky-tag]', '.cky-consent-container', '.cky-modal',
+  '#onetrust-banner-sdk', '#onetrust-consent-sdk',
+  '#CybotCookiebotDialog', '.termly-styles-root', '[data-tid="banner"]',
+  '.osano-cm-window', '#usercentrics-root', '[id^="usercentrics"]',
+  '#cookiescript_injected', '#cmpbox', '.cc-window', '#cookie-law-info-bar',
+];
+
+// A consent banner is not reliably in the DOM when the network goes quiet:
+// CookieYes and friends are routinely injected by a deferred script or by a tag
+// manager, which lands well after load. A fixed pause is therefore a race, and
+// losing it looks identical to a site with no banner at all — which is the most
+// expensive mistake this tool can make, because the run then reports on a
+// consent decision that was never offered.
+const CONSENT_UI_SELECTOR = [
+  ...CMP_PROFILES.flatMap((p) => [p.accept, p.reject]),
+  ...CMP_CONTAINERS,
+].join(', ');
+
+async function waitForConsentUi(page, overrideSelectors, timeoutMs = 12000) {
+  const selectors = [
+    overrideSelectors.accept, overrideSelectors.reject, CONSENT_UI_SELECTOR,
+  ].filter(Boolean).join(', ');
+  try {
+    await page.locator(selectors).first().waitFor({ state: 'visible', timeout: timeoutMs });
+    return true;
+  } catch (e) {
+    // No known container showed up. The banner may still be there under markup
+    // we do not recognise, so fall through to the text scan rather than
+    // concluding anything here.
+    return false;
+  }
+}
+
+// What a human would have seen. Printed only when detection fails, so that a
+// failure can be diagnosed from the log instead of guessed at.
+async function visibleClickableText(page, limit = 25) {
+  try {
+    return await page.evaluate((max) => {
+      const out = [];
+      const nodes = document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]');
+      for (const n of nodes) {
+        const r = n.getBoundingClientRect();
+        if (!r.width || !r.height) continue;
+        const t = (n.innerText || n.value || '').trim().replace(/\s+/g, ' ');
+        if (t && t.length <= 40 && !out.includes(t)) out.push(t);
+        if (out.length >= max) break;
+      }
+      return out;
+    }, limit);
+  } catch (e) {
+    return [];
+  }
+}
+
 const ACCEPT_TEXT = /^(accept all|allow all|accept cookies|i accept|agree|allow cookies)$/i;
 const REJECT_TEXT = /^(reject all|decline all|reject cookies|deny all|do not accept|necessary only|reject)$/i;
 
@@ -102,15 +159,19 @@ async function findButton(page, selectorList, textPattern) {
       if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) return el;
     }
   }
-  // Fallback: scan clickable text
-  const candidates = page.locator('button, a[role="button"], [role="button"], a');
-  const count = await candidates.count();
-  for (let i = 0; i < count; i++) {
-    const el = candidates.nth(i);
-    const visible = await el.isVisible().catch(() => false);
-    if (!visible) continue;
-    const text = (await el.innerText().catch(() => ''))?.trim();
-    if (text && textPattern.test(text)) return el;
+  // Fallback: scan clickable text. Some CMPs render their controls as div or
+  // span with a click handler rather than as buttons, and locators do not reach
+  // into iframes, so every frame is searched too.
+  const CLICKABLE = 'button, a, [role="button"], input[type="button"], input[type="submit"], div[class*="btn" i], div[class*="button" i], span[class*="btn" i], span[class*="button" i]';
+  for (const scope of [page, ...page.frames().filter((f) => f !== page.mainFrame())]) {
+    const candidates = scope.locator(CLICKABLE);
+    const count = await candidates.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const el = candidates.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const text = (await el.innerText().catch(() => ''))?.trim();
+      if (text && textPattern.test(text)) return el;
+    }
   }
   return null;
 }
@@ -415,12 +476,19 @@ async function captureState({ url, outPath, storagePath, configPath, action, ove
 
   try {
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500); // let the CMP banner render
+    // Wait for the banner itself rather than guessing how long it takes.
+    const sawConsentUi = await waitForConsentUi(page, overrideSelectors);
+    if (!sawConsentUi) await page.waitForTimeout(1500);
 
-    if (action === 'accept') {
-      result.cmpMatch = await detectAndClick(page, 'accept', overrideSelectors.accept);
-    } else if (action === 'reject') {
-      result.cmpMatch = await detectAndClick(page, 'reject', overrideSelectors.reject);
+    if (action === 'accept' || action === 'reject') {
+      result.cmpMatch = await detectAndClick(page, action, overrideSelectors[action]);
+      if (!result.cmpMatch) {
+        // Record what a visitor would have been looking at. Without this, a
+        // detection failure and a site with no banner produce identical logs,
+        // and the two get confused — including by whoever reads the report.
+        result.consentUiSeen = sawConsentUi;
+        result.visibleControls = await visibleClickableText(page);
+      }
     } else if (action.startsWith('category:')) {
       const grant = action.slice('category:'.length);
       const profile = CMP_PROFILES.find((pr) => pr.name === detectedCmp) || null;
@@ -477,7 +545,7 @@ async function discoverCmp(url, overrideSelectors, env) {
   const found = { cmp: null, categories: [], error: null };
   try {
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(1500);
+    if (!(await waitForConsentUi(page, overrideSelectors))) await page.waitForTimeout(1500);
 
     for (const profile of CMP_PROFILES) {
       const el = await findButton(page, profile.accept, ACCEPT_TEXT);
@@ -599,6 +667,13 @@ async function discoverCmp(url, overrideSelectors, env) {
       console.warn(`  Warning: ${result.error}`);
     } else if (s.action === 'accept' || s.action === 'reject') {
       console.log(`  Consent button matched via: ${result.cmpMatch ? result.cmpMatch.matched : 'NOT FOUND'}`);
+      if (!result.cmpMatch) {
+        console.warn(`    A known consent container ${result.consentUiSeen ? 'WAS' : 'was NOT'} visible on the page.`);
+        if ((result.visibleControls || []).length) {
+          console.warn(`    Visible controls at that moment: ${result.visibleControls.join(' | ')}`);
+        }
+        console.warn('    If a banner is visible in a browser, this is a detection failure, not a missing banner.');
+      }
     }
     if (result.cookieCount !== undefined) {
       console.log(`  Cookies: ${result.cookieCount}, localStorage keys: ${result.localStorageCount}`);
