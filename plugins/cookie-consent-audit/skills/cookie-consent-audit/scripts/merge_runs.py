@@ -63,6 +63,13 @@ def main():
 
     total = len(runs)
 
+    # A run where the banner was never clicked is the pre-consent capture three
+    # times over. Counting agreement between such runs would manufacture
+    # confidence out of nothing: they agree precisely because no consent
+    # decision was ever made in any of them.
+    exercised = [i for i, r in runs if r["summary"].get("consent_exercised")]
+    inconclusive = [i for i, r in runs if not r["summary"].get("consent_exercised")]
+
     # Base: the worst run we saw. Reporting the mildest would understate the
     # site, and averaging would invent a run that never happened.
     base_idx, base = max(runs, key=lambda r: (
@@ -102,6 +109,12 @@ def main():
     base["summary"]["multi_run"] = {
         "runs": total,
         "base_run": base_idx,
+        "runs_consent_exercised": len(exercised),
+        "runs_inconclusive": inconclusive,
+        # Pre-consent findings survive an unexercised banner: a request seen
+        # before any click happened before any click, whatever happened next.
+        # Anything that depends on Reject does not.
+        "stability_meaningful": len(inconclusive) == 0,
         "gap_stability": rows(gap_counts, "tracker"),
         "tracker_stability": rows(tracker_counts, "tracker"),
         "cookie_stability": rows(cookie_counts, "cookie"),
@@ -116,6 +129,21 @@ def main():
         json.dump(base, fh, indent=2)
 
     print(f"Merged {total} runs (reporting run {base_idx}, the one with the most gaps).")
+    if inconclusive:
+        print()
+        print("=" * 72)
+        print(f"STABILITY NOT MEANINGFUL - {len(inconclusive)} of {total} RUNS NEVER EXERCISED THE BANNER")
+        print(f"  Runs without a consent decision: {', '.join(str(i) for i in inconclusive)}")
+        print()
+        print("Those runs are the pre-consent capture under other names, so they")
+        print("agree with each other by construction. Counts below are NOT evidence")
+        print("that consent gating was tested repeatedly and held.")
+        print()
+        print("What does survive: a tracker seen firing before consent did fire")
+        print("before consent, because no click was needed for that to be true.")
+        print("What does not: anything resting on Reject, which was never pressed.")
+        print("=" * 72)
+        print()
     for row in rows(gap_counts, "tracker"):
         mark = "stable" if row["stable"] else "INTERMITTENT"
         print(f"  {row['tracker']}: gap in {row['seen_in']}/{total} runs [{mark}]")

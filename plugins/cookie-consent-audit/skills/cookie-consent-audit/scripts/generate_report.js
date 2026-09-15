@@ -556,11 +556,29 @@ function main() {
       p("A gap seen in any run is real — the request was observed, and repeating the capture cannot unfind it. A finding that appears in some runs but not others is not noise to be averaged away: a tag that gates correctly only sometimes is broken, and is the harder version of the same fault. Conversely, a clean result is only as strong as the number of runs behind it.", { size: 18, color: "555555", italics: true }),
     );
 
+    // Runs that never exercised the banner agree with each other by
+    // construction — they are the same pre-consent capture under other names.
+    // Presenting "2 of 2 runs" from those as corroboration would manufacture
+    // confidence out of nothing, so say so before the table, not after it.
+    if (multiRun.stability_meaningful === false) {
+      const bad = (multiRun.runs_inconclusive || []).join(", ");
+      children.push(
+        p(`These counts are NOT corroboration. ${(multiRun.runs_inconclusive || []).length} of ${n} runs (${bad}) never exercised the consent banner, so those runs are the pre-consent capture under another name and agree with each other by construction.`, { bold: true, color: RED }),
+        p("What still holds: a tracker seen firing before consent did fire before consent — no click was needed for that to be true. What does not hold: anything resting on Reject, which was never pressed. Re-run with explicit Accept/Reject selectors before treating the repeat runs as evidence of anything.", { size: 18, color: "555555" }),
+      );
+    }
+
     const gapRows = (multiRun.gap_stability || []);
     children.push(gapRows.length
       ? makeTable(
           ["Tracker", "Gap seen in", "Verdict"],
-          gapRows.map((r) => [r.tracker, `${r.seen_in} of ${r.of} runs`, r.stable ? "Consistent" : "Intermittent — still a fault"]),
+          gapRows.map((r) => [
+            r.tracker,
+            `${r.seen_in} of ${r.of} runs`,
+            multiRun.stability_meaningful === false
+              ? "Not corroborated — runs were inconclusive"
+              : (r.stable ? "Consistent" : "Intermittent — still a fault"),
+          ]),
           [4600, 2240, 3240],
           gapRows.map((r) => (r.stable ? RED : AMBER)))
       : p(`No consent gaps were found in any of the ${n} runs.`, { color: GREEN }));
@@ -580,7 +598,7 @@ function main() {
       );
     }
 
-    if (!(multiRun.unstable || []).length) {
+    if (!(multiRun.unstable || []).length && multiRun.stability_meaningful !== false) {
       children.push(p(`Every finding reproduced in all ${n} runs.`, { color: GREEN }));
     }
   }
