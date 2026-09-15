@@ -133,6 +133,27 @@ def classify(value, trackers):
     return None
 
 
+def is_document(entry):
+    """Whether a HAR entry is a page navigation.
+
+    Playwright does not write the _resourceType field its own HARs were assumed
+    to carry, in either 'full' or 'minimal' mode. Relying on it meant per-page
+    attribution silently produced nothing on every real capture: the Pages
+    column read "—" and the report announced that attribution was unavailable.
+    The hand-written fixtures do carry the field, so the tests passed throughout.
+
+    The content type is what actually distinguishes a navigation, and it is
+    present in both modes. The field is still honoured where something does
+    supply it.
+    """
+    if entry.get("_resourceType") == "document":
+        return True
+    if entry.get("_resourceType"):
+        return False  # explicitly something else
+    mime = (((entry.get("response") or {}).get("content") or {}).get("mimeType") or "")
+    return mime.split(";")[0].strip().lower() in ("text/html", "application/xhtml+xml")
+
+
 def classify_cookie_function(name, cookie_functions):
     """The function a cookie serves, by name. A trailing '*' matches by prefix."""
     low = (name or "").lower()
@@ -353,8 +374,7 @@ def analyze_file(path, trackers, site_domain):
         parsed = urlparse(url)
         domain = parsed.netloc
         domain_counts[domain] += 1
-        if (e.get("_resourceType") == "document" and site_domain
-                and registrable_domain(domain) == site_domain):
+        if site_domain and registrable_domain(domain) == site_domain and is_document(e):
             current_page = parsed.path or "/"
             pages_seen.add(current_page)
         name = classify(url, trackers)

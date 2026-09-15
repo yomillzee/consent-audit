@@ -74,6 +74,16 @@ jobs:
         with:
           python-version: '3.12'
 
+      # Each run was otherwise downloading Chrome for Testing, the headless
+      # shell and ffmpeg from scratch — about 300 MB and ~20s of the run, and a
+      # pointless load on Playwright's CDN. Keyed on package.json so a
+      # Playwright version bump invalidates it.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('plugins/cookie-consent-audit/skills/cookie-consent-audit/scripts/package.json') }}
+
       # Done here rather than leaving it to run_audit.sh so that Chromium's
       # system libraries (--with-deps) are installed too. The script's own
       # install step then finds the browser already present and no-ops.

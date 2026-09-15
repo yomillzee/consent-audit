@@ -489,11 +489,32 @@ for name in ("_ga", "_fbp", "__hstc", "hubspotutk", "_hjSessionUser", "_clck"):
     if A.classify_cookie_function(name, fns) is not None:
         fail.append(name + " wrongly classified as a non-consent cookie")
 
+# --- page attribution must survive real Playwright output ------------------
+# The checked-in fixtures carry a _resourceType field that Playwright does not
+# actually emit, in either HAR mode. Every test passed on those fixtures while
+# per-page attribution produced nothing on real captures for as long as it
+# existed. These entries are shaped like genuine Playwright output.
+real_nav = {"request": {"url": "https://site.test/about"},
+            "response": {"content": {"mimeType": "text/html; charset=utf-8"}}}
+real_css = {"request": {"url": "https://site.test/a.css"},
+            "response": {"content": {"mimeType": "text/css"}}}
+if not A.is_document(real_nav):
+    fail.append("a navigation with no _resourceType must be recognised by content type")
+if A.is_document(real_css):
+    fail.append("a stylesheet must not be counted as a page navigation")
+# ...and an explicit _resourceType still wins where something supplies it.
+if not A.is_document({"_resourceType": "document", "request": {"url": "x"}}):
+    fail.append("an explicit document _resourceType must still be honoured")
+if A.is_document({"_resourceType": "xhr", "request": {"url": "x"},
+                  "response": {"content": {"mimeType": "text/html"}}}):
+    fail.append("an explicit non-document _resourceType must win over the content type")
+
 if fail:
     for f in fail:
         print("  FAIL:", f)
     sys.exit(1)
 print("  Google identifier kinds distinguished; security/consent cookies separated from tracking")
+print("  page navigations recognised from real Playwright output")
 GUARDS
 
 echo "== a capture that observed nothing =="
