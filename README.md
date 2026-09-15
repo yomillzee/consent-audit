@@ -4,6 +4,13 @@ A Claude Code plugin marketplace hosting **cookie-consent-audit** — a skill th
 runs a cookie/tracking consent compliance audit on any website and produces a
 client-ready Word report.
 
+> **Run this on your computer, not in Claude Code on the web.**
+> The audit drives a real browser against the live site and every tracker domain
+> it calls, so it needs ordinary internet access. Cloud sessions
+> ([claude.ai/code](https://claude.ai/code)) route traffic through a policy proxy
+> that blocks the target site and the trackers alike, and the run fails at the
+> first page load. Details in [Where this runs](#where-this-runs).
+
 Given a URL, it captures live network traffic **plus cookies, localStorage and
 sessionStorage** in isolated browser sessions — no consent decision, after
 "Accept All", after "Reject All", and **once per individual consent category** —
