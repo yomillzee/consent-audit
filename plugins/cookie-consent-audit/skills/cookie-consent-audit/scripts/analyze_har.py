@@ -439,7 +439,12 @@ def analyze_file(path, trackers, site_domain):
         "tracker_examples": {k: v[0] for k, v in tracker_hits.items()},
         "tracker_urls": {k: sorted(set(v)) for k, v in tracker_hits.items()},
         "unknown_domains": unknown,
-        "unknown_domain_count": len(unknown),
+        # The full list keeps first-party domains too, because the appendix
+        # discloses everything observed. The COUNT must not: the site's own
+        # domain is not an unidentified third party, and counting it reported
+        # "1 unclassified domain" with no finding behind it — the number was
+        # the site itself.
+        "unknown_domain_count": sum(1 for u in unknown if u["third_party"]),
         "all_domains": dict(sorted(domain_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
         "third_party_domains": dict(sorted(third_party.items(), key=lambda kv: (-kv[1], kv[0]))),
     }
@@ -543,12 +548,26 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
     cookie_gaps = [c for c in pre_cookies if is_cookie_gap(c)]
     cookie_gaps_after_reject = [c for c in reject_cookies if is_cookie_gap(c)]
 
+    # A domain is identified by the requests actually made to it, not by its
+    # bare hostname. Several signatures are path-based — reCAPTCHA matches
+    # google.com/recaptcha — so classifying the hostname alone reported
+    # www.google.com as an unidentified third party while every request to it
+    # had in fact been attributed to reCAPTCHA.
+    domain_tracker = {}
+    for key, _ in STATES:
+        for tracker, urls in (states[key].get("tracker_urls") or {}).items():
+            for u in urls:
+                host = urlparse(u).netloc
+                if host:
+                    domain_tracker.setdefault(host, tracker)
+
     # Union of every non-first-party domain seen in any state.
     all_third_party = defaultdict(lambda: {"pre": 0, "postaccept": 0, "postreject": 0, "tracker": None})
     for key, _ in STATES:
         for d, n in states[key].get("third_party_domains", {}).items():
             all_third_party[d][key] = n
-            all_third_party[d]["tracker"] = all_third_party[d]["tracker"] or classify(d, trackers)
+            all_third_party[d]["tracker"] = (
+                all_third_party[d]["tracker"] or domain_tracker.get(d) or classify(d, trackers))
 
     # --- Per-category consent testing -------------------------------------
     # Each scenario granted exactly one category and denied the rest, so any
@@ -895,6 +914,9 @@ def build_findings(outdir, trackers, allowlist=None, site_url=None, cookie_sigs=
             "before_consent": "Contacted", "after_reject": "\u2014", "after_accept": "\u2014",
             "result": RESULT_REVIEW, "technical_result": RESULT_REVIEW, "legal_note": None,
             "confidence": "low", "display_name": "Unidentified third-party domains",
+            # Carried as data, so the count and the finding can be checked
+            # against each other instead of against prose.
+            "domains": review_domains,
             "evidence": [f"Contacted before a consent decision but absent from the signature list: {', '.join(review_domains)}.",
                          "Not recognising a domain is a limit of the signature list, not evidence of a breach. Attribute them before drawing a conclusion."],
             "action": "Attribute these domains",
@@ -1134,7 +1156,9 @@ def main():
         print(f"Cookies set: pre={s['cookie_counts']['pre']} "
               f"accept={s['cookie_counts']['postaccept']} reject={s['cookie_counts']['postreject']}")
         if s["cookie_gaps_pre_consent"]:
-            print(f"  {len(s['cookie_gaps_pre_consent'])} tracking/third-party cookie(s) set BEFORE consent:")
+            owners = sorted({c["attributed_to"] for c in s["cookie_gaps_pre_consent"] if c["attributed_to"]})
+            who = f"{', '.join(owners)} " if owners else ""
+            print(f"  {len(s['cookie_gaps_pre_consent'])} non-essential {who}cookie(s) set BEFORE consent:")
             for c in s["cookie_gaps_pre_consent"]:
                 label = c["attributed_to"] or c["registrable_domain"]
                 life = "session" if c["session_cookie"] else f"{c['expires_days']}d"

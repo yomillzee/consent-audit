@@ -162,6 +162,18 @@ function validateConsistency(summary, findings) {
     }
   }
 
+  // A count with nothing behind it is how the last inconsistency hid: the
+  // summary reported one unclassified domain, no finding explained it, and
+  // both were "correct" because they were counting different populations.
+  if (summary.consent_exercised) {
+    const unknownPre = (summary.unknown_domain_counts || {}).pre;
+    const domainFinding = findings.find((f) => f.technology === "Unidentified third-party domains");
+    const named = domainFinding ? (domainFinding.domains || []).length : 0;
+    if (unknownPre !== undefined && named !== unknownPre) {
+      problems.push(`unknown_domain_counts.pre says ${unknownPre} but ${named} domain(s) are named in the findings`);
+    }
+  }
+
   const scen = summary.scenario_counts || {};
   const listed = (summary.category_scenarios_inconclusive || []).length;
   if (scen.inconclusive !== undefined && scen.inconclusive !== listed) {

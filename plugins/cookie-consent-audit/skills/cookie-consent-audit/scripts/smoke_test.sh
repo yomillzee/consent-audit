@@ -187,6 +187,21 @@ for name, row in tech.items():
     want = EXPECTED.get(row.get("technical_result"))
     if want and row.get("status") != want:
         errors.append(f"{name}: {row.get('technical_result')} should be {want}, got {row.get('status')!r}")
+# A domain is identified by the requests made to it, not by its hostname.
+# reCAPTCHA matches on google.com/recaptcha, so classifying the bare host left
+# www.google.com reported as an unidentified third party while every request to
+# it had been attributed.
+tp = s["third_party_domains_all_states"]
+if "www.google.com" in tp and not tp["www.google.com"].get("tracker"):
+    errors.append("www.google.com carries only reCAPTCHA traffic and must not read as unidentified")
+# ...and the count must agree with what the findings actually name.
+domain_finding = next((f for f in s["findings"]
+                       if f["technology"] == "Unidentified third-party domains"), None)
+named = len(domain_finding["domains"]) if domain_finding else 0
+if s["unknown_domain_counts"]["pre"] != named:
+    errors.append(f"unknown_domain_counts.pre is {s['unknown_domain_counts']['pre']} "
+                  f"but {named} domain(s) are named in the findings")
+
 # The firing matrix must not carry its own opinion.
 canon = {f["technology"]: f["technical_result"] for f in s["findings"]}
 for m in s["tracker_matrix"]:
